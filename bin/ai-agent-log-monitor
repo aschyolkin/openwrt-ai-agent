@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python3 -m ai_agent.log_monitor_main

@@ -1,0 +1,3 @@
+#!/bin/sh
+exec /usr/bin/ai-agent-cli --json cleanup >/dev/null
+

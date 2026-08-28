@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+secrets.env
+sessions.sqlite*
+backups/
+audit.log
+
