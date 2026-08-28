@@ -1,2 +1,3 @@
 #!/bin/sh
+export PYTHONPATH=/usr/lib/ai-agent
 exec /usr/bin/python3 -m ai_agent.log_monitor_main

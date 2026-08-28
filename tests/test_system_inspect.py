@@ -211,6 +211,25 @@ class PromptRegressionTests(unittest.TestCase):
         self.assertIn("/usr/bin/ai-agent-maintenance # ai-agent-maintenance", installer)
         self.assertNotIn("ai-agent-cli --json health >/dev/null 2>&1 # ai-agent-maintenance", installer)
 
+    def test_cron_invoked_bin_scripts_set_pythonpath(self):
+        # Скрипты, запускаемые напрямую через `python3 -m ai_agent.<module>` из
+        # cron (не через ai-agent-cli и не через procd, который сам передаёт env),
+        # обязаны сами экспортировать PYTHONPATH — иначе cron роняет их с
+        # ModuleNotFoundError ещё до входа в код, а последствия неотличимы от
+        # "cron не сработал" (см. ai-agent-log-monitor/ai-agent-metrics-sample).
+        root = Path(__file__).resolve().parents[1]
+        installer = (root / "install.sh").read_text(encoding="utf-8")
+        cron_lines = [line for line in installer.splitlines() if line.strip().startswith(("*", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")) and "/usr/bin/" in line]
+        for line in cron_lines:
+            script_name = line.split("/usr/bin/", 1)[1].split()[0]
+            script_path = root / "bin" / script_name
+            content = script_path.read_text(encoding="utf-8")
+            if "python3 -m ai_agent." in content:
+                self.assertIn(
+                    "export PYTHONPATH=/usr/lib/ai-agent", content,
+                    f"bin/{script_name} запускается из cron и напрямую вызывает python3 -m, но не экспортирует PYTHONPATH",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

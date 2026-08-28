@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+import syslog
+import traceback
 
 import requests
 
@@ -46,17 +48,26 @@ def main() -> None:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        telegram_env = _env("/etc/ai-agent/telegram.env")
-        chats = [int(item.strip()) for item in telegram_env.get("TELEGRAM_ALLOWED_CHAT_IDS", "").split(",") if item.strip()]
-        api_key = load_secret("/etc/ai-agent/secrets.env")
-        http = requests.Session()
-        http.trust_env = False
-        llm = LLMClient("https://ai.api.cloud.yandex.net/v1", api_key, DEFAULT_COMPLEX_MODEL, timeout=60, session=http)
-        telegram = TelegramBotClient(
-            telegram_env["TELEGRAM_BOT_TOKEN"], proxy=telegram_env.get("TELEGRAM_PROXY") or "http://10.110.112.1:2080"
-        )
-        monitor = LogMonitor(llm, telegram, chats, "/var/lib/ai-agent/log-monitor-state.json")
-        print(json.dumps(monitor.run(collect_logread(), current_state=runtime_state()), ensure_ascii=False))
+        try:
+            telegram_env = _env("/etc/ai-agent/telegram.env")
+            chats = [int(item.strip()) for item in telegram_env.get("TELEGRAM_ALLOWED_CHAT_IDS", "").split(",") if item.strip()]
+            api_key = load_secret("/etc/ai-agent/secrets.env")
+            http = requests.Session()
+            http.trust_env = False
+            llm = LLMClient("https://ai.api.cloud.yandex.net/v1", api_key, DEFAULT_COMPLEX_MODEL, timeout=60, session=http)
+            telegram = TelegramBotClient(
+                telegram_env["TELEGRAM_BOT_TOKEN"], proxy=telegram_env.get("TELEGRAM_PROXY") or "http://10.110.112.1:2080"
+            )
+            monitor = LogMonitor(llm, telegram, chats, "/var/lib/ai-agent/log-monitor-state.json")
+            print(json.dumps(monitor.run(collect_logread(), current_state=runtime_state()), ensure_ascii=False))
+        except Exception:
+            # Без этого cron-запуск, упавший на исключении (сеть до LLM/Telegram,
+            # битый секрет и т.п.), выглядел бы неотличимо от "cron не сработал" —
+            # last_run_epoch в state-файле просто не обновится и трассировка нигде
+            # не осядет (сислог на роутере — кольцевой буфер без файла).
+            syslog.openlog("ai-agent-log-monitor", syslog.LOG_PID)
+            syslog.syslog(syslog.LOG_ERR, "run failed: " + traceback.format_exc().strip().replace("\n", " | "))
+            raise
 
 
 if __name__ == "__main__":
