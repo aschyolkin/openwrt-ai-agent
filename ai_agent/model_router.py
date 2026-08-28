@@ -34,7 +34,7 @@ READ_ONLY_HINTS = re.compile(
     r"маршрут|routing|нод|node|интерфейс|interface|dns|telegram|телеграм|"
     r"discord|youtube|chatgpt|claude|github|zapret|nfqws|adguard|sing-box|"
     r"netshift|процесс|памят|диск|порт|слушает|кто ты|помощ|привет|/start|"
-    r"аудит|audit|менялось|что мы дела)",
+    r"аудит|audit|менялось|что мы дела|нормальн|обычн|аномал|baseline)",
     re.IGNORECASE,
 )
 
@@ -59,6 +59,8 @@ def read_only_tools_for(message: str, limit: int = 5) -> tuple[str, ...]:
 
     if re.search(r"температур|нагрузк|cpu|памят|memory|uptime|диск", text):
         add("sys_resource_usage")
+    if re.search(r"нормальн|обычн|аномал|baseline|много ли|мало ли|это много|это мало", text):
+        add("sys_baseline_compare")
     if re.search(r"файрвол|firewall|nft|маршрут|routing|route|policy|процесс|порт|слуша|conntrack|соединени", text):
         add("sys_inspect")
     if re.search(r"интерфейс|interface|rx|tx|сетев", text):

@@ -41,6 +41,10 @@ class AgentConfig:
         return str(Path(self.state_dir) / "sessions.sqlite")
 
     @property
+    def metrics_path(self) -> str:
+        return str(Path(self.state_dir) / "metrics.sqlite")
+
+    @property
     def backups_dir(self) -> str:
         return str(Path(self.state_dir) / "backups")
 

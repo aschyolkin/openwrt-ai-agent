@@ -16,4 +16,5 @@ class ToolContext:
     ubus: UBusAdapter
     http: Any
     backups: Any = None
+    metrics: Any = None
 

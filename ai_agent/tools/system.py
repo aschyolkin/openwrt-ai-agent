@@ -8,61 +8,27 @@ from pathlib import Path
 from typing import Any
 
 from ..command import first_executable
+from ..metrics import cpu_temperatures, cpu_usage_percent, sample_current_metrics
 from ..redaction import redact_log_network_data
 from ..registry import tool
 
 
 EMPTY_OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
 
-
-def _read_proc_stat_cpu_lines() -> dict[str, list[int]]:
-    result: dict[str, list[int]] = {}
-    with open("/proc/stat", "r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.startswith("cpu"):
-                break
-            parts = line.split()
-            name = parts[0]
-            if name == "cpu" and len(parts) == 1:
-                continue
-            result[name] = [int(field) for field in parts[1:]]
-    return result
+METRIC_DIRECTION = {
+    "cpu_percent": "high_bad",
+    "mem_available_percent": "low_bad",
+    "conntrack_count": "high_bad",
+    "wan_latency_ms": "high_bad",
+    "packet_loss_percent": "high_bad",
+    "lan_client_count": "neutral",
+}
+MIN_SAMPLES_FOR_BASELINE = 20
 
 
-def _cpu_usage_percent(sample_seconds: float = 0.2) -> dict[str, float]:
-    """Two /proc/stat samples over a short window give an instantaneous
-    per-core utilization snapshot (jiffies deltas), same technique 'top' uses."""
-    before = _read_proc_stat_cpu_lines()
-    time.sleep(sample_seconds)
-    after = _read_proc_stat_cpu_lines()
-    usage: dict[str, float] = {}
-    for name, after_fields in after.items():
-        before_fields = before.get(name)
-        if not before_fields or len(before_fields) < 4:
-            continue
-        total_before = sum(before_fields)
-        total_after = sum(after_fields)
-        idle_before = before_fields[3] + (before_fields[4] if len(before_fields) > 4 else 0)
-        idle_after = after_fields[3] + (after_fields[4] if len(after_fields) > 4 else 0)
-        total_delta = total_after - total_before
-        idle_delta = idle_after - idle_before
-        usage[name] = round(max(0.0, min(100.0, (1 - idle_delta / total_delta) * 100)), 1) if total_delta > 0 else 0.0
-    return usage
-
-
-def _cpu_temperatures() -> list[dict[str, Any]]:
-    zones: list[dict[str, Any]] = []
-    root = Path("/sys/class/thermal")
-    if not root.is_dir():
-        return zones
-    for zone_dir in sorted(root.glob("thermal_zone*")):
-        try:
-            zone_type = (zone_dir / "type").read_text(encoding="utf-8").strip()
-            raw_temp = (zone_dir / "temp").read_text(encoding="utf-8").strip()
-            zones.append({"zone": zone_type, "celsius": round(int(raw_temp) / 1000, 1)})
-        except (OSError, ValueError):
-            continue
-    return zones
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    index = round(pct / 100 * (len(sorted_values) - 1))
+    return sorted_values[index]
 
 
 @tool(
@@ -115,7 +81,7 @@ def sys_resource_usage(context, arguments: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError, IndexError):
         uptime = None
     overlay = shutil.disk_usage("/overlay" if Path("/overlay").exists() else "/")
-    cpu_usage = _cpu_usage_percent()
+    cpu_usage = cpu_usage_percent()
     cores = sorted(
         ((name, pct) for name, pct in cpu_usage.items() if name != "cpu"),
         key=lambda item: int(item[0][3:]) if item[0][3:].isdigit() else item[0],
@@ -125,7 +91,7 @@ def sys_resource_usage(context, arguments: dict[str, Any]) -> dict[str, Any]:
         "storage": {"total": overlay.total, "used": overlay.used, "free": overlay.free},
         "cpu_percent": cpu_usage.get("cpu"),
         "cpu_percent_per_core": [{"cpu": name, "usage_percent": pct} for name, pct in cores],
-        "cpu_temperatures_celsius": _cpu_temperatures(),
+        "cpu_temperatures_celsius": cpu_temperatures(),
     }
 
 
@@ -187,5 +153,53 @@ def agent_audit_log(context, arguments: dict[str, Any]) -> dict[str, Any]:
         "entries": page, "total": len(entries), "offset": offset,
         "next_offset": next_offset if next_offset < len(entries) else None,
         "note": "Только действия самого агента (plan/confirm/apply/verify/rollback). Ручные изменения по SSH сюда не попадают.",
+    }
+
+
+@tool(
+    name="sys_baseline_compare",
+    description=(
+        "Сравнить текущее значение метрики (CPU/память/conntrack/WAN-задержка/packet loss/"
+        "число клиентов LAN) с историческим baseline за последние N дней — чтобы понять, "
+        "нормальное это значение или аномальное для этого роутера."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "metric": {"type": "string", "enum": list(METRIC_DIRECTION)},
+            "days_of_history": {"type": "integer", "minimum": 1, "maximum": 30},
+        },
+        "required": ["metric"],
+        "additionalProperties": False,
+    },
+)
+def sys_baseline_compare(context, arguments: dict[str, Any]) -> dict[str, Any]:
+    metric = arguments["metric"]
+    days = int(arguments.get("days_of_history", 7))
+    since = int(time.time()) - days * 86400
+    history = context.metrics.recent_samples(metric, since)
+    current = sample_current_metrics().get(metric)
+    if len(history) < MIN_SAMPLES_FOR_BASELINE:
+        return {
+            "metric": metric, "status": "insufficient_data",
+            "sample_count": len(history), "current": current,
+            "interpretation": "Недостаточно накопленных сэмплов для baseline — не делай вывод о норме/аномалии по одному текущему значению.",
+        }
+    sorted_history = sorted(history)
+    p5, p50, p95 = _percentile(sorted_history, 5), _percentile(sorted_history, 50), _percentile(sorted_history, 95)
+    direction = METRIC_DIRECTION[metric]
+    if current is None:
+        anomalous = False
+    elif direction == "high_bad":
+        anomalous = current > p95 and current > p50 * 1.3
+    elif direction == "low_bad":
+        anomalous = current < p5 and current < p50 * 0.7
+    else:
+        anomalous = current < p5 or current > p95
+    return {
+        "metric": metric, "status": "ok", "current": current, "sample_count": len(history),
+        "baseline": {"p5": p5, "p50": p50, "p95": p95, "min": sorted_history[0], "max": sorted_history[-1]},
+        "anomalous": anomalous,
+        "interpretation": "Baseline — эмпирический диапазон наблюдений, не жёсткий порог. Единичный выход за p95 — повод присмотреться, не готовый диагноз.",
     }
 

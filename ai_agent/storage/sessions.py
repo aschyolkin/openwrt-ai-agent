@@ -23,6 +23,10 @@ class SessionStore:
     def _initialize(self) -> None:
         with self._lock, self.connection:
             self.connection.execute("PRAGMA journal_mode=WAL")
+            # NORMAL снижает число fsync на каждое сообщение/tool-вызов (пишется
+            # чаще всего в проекте); безопасная комбинация с WAL, риск — потеря
+            # последней незакоммиченной транзакции при потере питания.
+            self.connection.execute("PRAGMA synchronous=NORMAL")
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.executescript(
                 """

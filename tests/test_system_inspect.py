@@ -72,7 +72,7 @@ class SystemInspectTests(unittest.TestCase):
         names = {item["function"]["name"] for item in registry.schemas()}
         self.assertTrue({
             "sys_inspect", "sys_service_control", "sys_package_install", "sys_package_remove",
-            "netshift_service_health", "agh_diagnose_domain", "agent_audit_log",
+            "netshift_service_health", "agh_diagnose_domain", "agent_audit_log", "sys_baseline_compare",
         } <= names)
 
 

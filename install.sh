@@ -56,6 +56,7 @@ install_file 0755 "$SCRIPT_DIR/bin/ai-agent" /usr/bin/ai-agent
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-cli" /usr/bin/ai-agent-cli
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-maintenance" /usr/bin/ai-agent-maintenance
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-log-monitor" /usr/bin/ai-agent-log-monitor
+install_file 0755 "$SCRIPT_DIR/bin/ai-agent-metrics-sample" /usr/bin/ai-agent-metrics-sample
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-telegram" /usr/bin/ai-agent-telegram
 install_file 0755 "$SCRIPT_DIR/etc/init.d/ai-agent" /etc/init.d/ai-agent
 install_file 0755 "$SCRIPT_DIR/etc/init.d/ai-agent-telegram" /etc/init.d/ai-agent-telegram
@@ -93,6 +94,8 @@ sed -i '/# ai-agent-maintenance$/d' "$CRON"
 echo '17 4 * * * /usr/bin/ai-agent-maintenance # ai-agent-maintenance' >> "$CRON"
 sed -i '/# ai-agent-log-monitor$/d' "$CRON"
 echo '23 */4 * * * /usr/bin/ai-agent-log-monitor # ai-agent-log-monitor' >> "$CRON"
+sed -i '/# ai-agent-metrics-sample$/d' "$CRON"
+echo '*/10 * * * * /usr/bin/ai-agent-metrics-sample # ai-agent-metrics-sample' >> "$CRON"
 /etc/init.d/cron restart >/dev/null 2>&1 || true
 
 /etc/init.d/ai-agent enable

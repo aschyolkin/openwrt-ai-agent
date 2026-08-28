@@ -18,6 +18,7 @@ from .redaction import sanitize
 from .registry import ToolRegistry
 from .safety.actions import ActionManager
 from .safety.backup import BackupStore
+from .storage.metrics import MetricsStore
 from .storage.sessions import SessionStore
 from .tools import register_all
 from .tools.backup import backup_restore
@@ -39,7 +40,8 @@ class AgentCore:
         self.http.trust_env = False
         self.sessions = SessionStore(self.config.database_path)
         self.backups = BackupStore(self.config.backups_dir, self.uci)
-        self.context = ToolContext(self.config, self.runner, self.uci, self.ubus, self.http, self.backups)
+        self.metrics = MetricsStore(self.config.metrics_path)
+        self.context = ToolContext(self.config, self.runner, self.uci, self.ubus, self.http, self.backups, self.metrics)
         self.registry = ToolRegistry()
         register_all(self.registry)
         self.registry.register(backup_restore)

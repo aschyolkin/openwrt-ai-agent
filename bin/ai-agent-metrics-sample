@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python3 -m ai_agent.metrics_sampler_main
