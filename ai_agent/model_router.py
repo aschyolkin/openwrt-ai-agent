@@ -33,7 +33,8 @@ READ_ONLY_HINTS = re.compile(
     r"нагрузк|температур|правил|файрвол|firewall|nft|соединени|conntrack|"
     r"маршрут|routing|нод|node|интерфейс|interface|dns|telegram|телеграм|"
     r"discord|youtube|chatgpt|claude|github|zapret|nfqws|adguard|sing-box|"
-    r"netshift|процесс|памят|диск|порт|слушает|кто ты|помощ|привет|/start)",
+    r"netshift|процесс|памят|диск|порт|слушает|кто ты|помощ|привет|/start|"
+    r"аудит|audit|менялось|что мы дела)",
     re.IGNORECASE,
 )
 
@@ -63,7 +64,7 @@ def read_only_tools_for(message: str, limit: int = 5) -> tuple[str, ...]:
     if re.search(r"интерфейс|interface|rx|tx|сетев", text):
         add("net_interfaces_status", "net_device_stats", "sys_inspect")
     if re.search(r"dns|домен|резолв|adguard|agh", text):
-        add("net_dns_check", "agh_service_status", "agh_check_domain_blocked", "agh_config_read")
+        add("net_dns_check", "agh_service_status", "agh_check_domain_blocked", "agh_config_read", "agh_diagnose_domain")
     if re.search(r"telegram|телеграм|discord|youtube|chatgpt|claude|github", text):
         add("netshift_service_health", "netshift_check_domain_routing", "net_dns_check", "singbox_connections")
     if re.search(r"netshift|sing.box|vpn|прокс", text):
@@ -74,6 +75,8 @@ def read_only_tools_for(message: str, limit: int = 5) -> tuple[str, ...]:
         add("sys_logread")
     if re.search(r"backup|резервн", text):
         add("backup_list")
+    if re.search(r"аудит|audit|что мен[яи]|истори[яи] измен|что дела(л|ли)|что мы дела", text):
+        add("agent_audit_log")
     if not tools and re.search(r"статус|состояние|покажи|проверь", text):
         add("sys_resource_usage", "net_interfaces_status", "sys_inspect")
     return tuple(tools[:limit])

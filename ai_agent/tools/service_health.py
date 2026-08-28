@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from ..errors import AgentError, ServiceNotReady
 from ..registry import tool
-from .common import dns_query, is_fakeip, process_running
+from .common import dns_query, is_fakeip, nft_ruleset_text, process_running
 from .netshift_singbox import _clash_request, _selectors
 
 
@@ -47,11 +48,36 @@ def _configured_rules(keywords: list[str]) -> list[str]:
     return list(dict.fromkeys(matches))[:100]
 
 
+_NFT_TABLE_PATTERN = re.compile(r"table\s+inet\s+NetShiftTable\b")
+_NFT_TPROXY_PATTERN = re.compile(r"tproxy\s+ip\s+to\s+127\.0\.0\.1:(\d+)")
+
+
+def _firewall_interception_active(context) -> dict[str, Any]:
+    """Check that netshift's nftables tproxy interception table+rule exist.
+
+    Single global check (NOT per-service/per-domain): NetShiftTable's mangle
+    chain redirects marked fake-IP/subnet traffic to sing-box's tproxy port
+    for all configured sections/domains at once, so one ruleset read answers
+    the question for every `service` value.
+    """
+    text = nft_ruleset_text(context)
+    table_present = bool(_NFT_TABLE_PATTERN.search(text))
+    tproxy_match = _NFT_TPROXY_PATTERN.search(text) if table_present else None
+    return {
+        "checked": bool(text),
+        "table_present": table_present,
+        "tproxy_rule_present": bool(tproxy_match),
+        "tproxy_port": int(tproxy_match.group(1)) if tproxy_match else None,
+        "active": table_present and bool(tproxy_match),
+    }
+
+
 @tool(
     name="netshift_service_health",
     description=(
         "Проверить маршрутизацию популярного сервиса через netshift без ложного ping fake-IP: "
-        "DNS/fake-IP, процесс sing-box, Clash API, сгенерированные route/rule-set и активные соединения. "
+        "DNS/fake-IP, процесс sing-box, Clash API, сгенерированные route/rule-set, nftables-перехват "
+        "(table inet NetShiftTable + tproxy) и активные соединения. "
         "Отличает 'маршрут настроен' от 'активный трафик наблюдается' и не рекомендует restart по одному слабому сигналу."
     ),
     parameters={
@@ -111,8 +137,11 @@ def netshift_service_health(context, arguments: dict[str, Any]) -> dict[str, Any
 
     process_alive = process_running("sing-box")
     configured_rules = _configured_rules(keywords)
+    firewall = _firewall_interception_active(context)
     fakeip_observed = any(check["fakeip_observed"] for check in dns_checks)
-    route_configured = bool(process_alive and api_available and fakeip_observed and configured_rules)
+    route_configured = bool(
+        process_alive and api_available and fakeip_observed and configured_rules and firewall["active"]
+    )
     active_traffic = bool(connections)
 
     if active_traffic:
@@ -121,10 +150,16 @@ def netshift_service_health(context, arguments: dict[str, Any]) -> dict[str, Any
         status = "configured_via_netshift_no_active_traffic_observed"
     elif not process_alive:
         status = "singbox_process_down"
+    elif fakeip_observed and not firewall["active"]:
+        status = "firewall_interception_missing"
     else:
         status = "indeterminate_needs_more_evidence"
 
-    restart_recommended = not process_alive or (not api_available and not fakeip_observed)
+    restart_recommended = (
+        not process_alive
+        or (not api_available and not fakeip_observed)
+        or (fakeip_observed and not firewall["active"])
+    )
     return {
         "service": service,
         "status": status,
@@ -133,12 +168,14 @@ def netshift_service_health(context, arguments: dict[str, Any]) -> dict[str, Any
         "restart_recommended": restart_recommended,
         "singbox_process": process_alive,
         "clash_api": {"available": api_available, "error": api_error},
+        "firewall": firewall,
         "dns": dns_checks,
         "matched_route_references": configured_rules,
         "selectors": selectors,
         "matching_connections": connections,
         "interpretation": (
             "Отсутствие активного соединения не означает поломку: клиент мог не использовать сервис в момент проверки. "
-            "Ping fake-IP и zapret dwc.sh не являются проверками доступности этого сервиса."
+            "Ping fake-IP и zapret dwc.sh не являются проверками доступности этого сервиса. "
+            "nftables-перехват проверяется один раз на весь netshift (общая таблица), а не отдельно на домен."
         ),
     }

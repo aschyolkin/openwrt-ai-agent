@@ -96,3 +96,19 @@ def is_fakeip(address: str) -> bool:
     except ValueError:
         return False
 
+
+def nft_ruleset_text(context, timeout: int = 15) -> str:
+    """Full `nft list ruleset` output, or "" if nft is unavailable/fails.
+
+    Degrades gracefully (does not raise) so callers can treat firewall-layer
+    evidence as "not observed" rather than crashing the whole diagnostic tool
+    when nft is missing or the command errors out — mirrors dns_query's
+    handling of a missing `dig`.
+    """
+    try:
+        executable = first_executable(("/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"))
+    except AgentError:
+        return ""
+    result = context.runner.run([executable, "list", "ruleset"], timeout=timeout, max_output_bytes=1024 * 1024)
+    return result.stdout if result.ok else ""
+

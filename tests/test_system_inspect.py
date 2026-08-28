@@ -70,7 +70,10 @@ class SystemInspectTests(unittest.TestCase):
         registry = ToolRegistry()
         register_all(registry)
         names = {item["function"]["name"] for item in registry.schemas()}
-        self.assertTrue({"sys_inspect", "sys_service_control", "sys_package_install", "sys_package_remove", "netshift_service_health"} <= names)
+        self.assertTrue({
+            "sys_inspect", "sys_service_control", "sys_package_install", "sys_package_remove",
+            "netshift_service_health", "agh_diagnose_domain", "agent_audit_log",
+        } <= names)
 
 
 class AdapterRegressionTests(unittest.TestCase):
@@ -113,12 +116,18 @@ class ServiceHealthRegressionTests(unittest.TestCase):
         suffix = "11" if server == "10.110.112.1" else "12"
         return {"ok": True, "server": server, "port": 53, "addresses": [f"198.18.1.{suffix}"], "returncode": 0}
 
+    _FIREWALL_ACTIVE = {
+        "checked": True, "table_present": True, "tproxy_rule_present": True,
+        "tproxy_port": 1602, "active": True,
+    }
+
+    @patch("ai_agent.tools.service_health._firewall_interception_active", return_value=_FIREWALL_ACTIVE)
     @patch("ai_agent.tools.service_health._configured_rules", return_value=["main-telegram-community-ruleset"])
     @patch("ai_agent.tools.service_health.process_running", return_value=True)
     @patch("ai_agent.tools.service_health.dns_query", side_effect=_dns.__func__)
     @patch("ai_agent.tools.service_health._selectors", return_value={"main-out": {"now": "Sweden"}})
     @patch("ai_agent.tools.service_health._clash_request")
-    def test_telegram_active_traffic_is_working(self, clash, _selectors_mock, _dns_mock, _process_mock, _rules_mock):
+    def test_telegram_active_traffic_is_working(self, clash, _selectors_mock, _dns_mock, _process_mock, _rules_mock, _firewall_mock):
         clash.return_value = {
             "connections": [{
                 "metadata": {"host": "api.telegram.org", "network": "tcp", "destinationPort": "443"},
@@ -136,12 +145,13 @@ class ServiceHealthRegressionTests(unittest.TestCase):
         self.assertTrue(result["active_traffic_observed"])
         self.assertFalse(result["restart_recommended"])
 
+    @patch("ai_agent.tools.service_health._firewall_interception_active", return_value=_FIREWALL_ACTIVE)
     @patch("ai_agent.tools.service_health._configured_rules", return_value=["main-telegram-community-ruleset"])
     @patch("ai_agent.tools.service_health.process_running", return_value=True)
     @patch("ai_agent.tools.service_health.dns_query", side_effect=_dns.__func__)
     @patch("ai_agent.tools.service_health._selectors", return_value={"main-out": {"now": "Sweden"}})
     @patch("ai_agent.tools.service_health._clash_request", return_value={"connections": []})
-    def test_no_current_connection_is_not_an_outage(self, _clash_mock, _selectors_mock, _dns_mock, _process_mock, _rules_mock):
+    def test_no_current_connection_is_not_an_outage(self, _clash_mock, _selectors_mock, _dns_mock, _process_mock, _rules_mock, _firewall_mock):
         result = netshift_service_health(None, {"service": "telegram"})
 
         self.assertEqual(result["status"], "configured_via_netshift_no_active_traffic_observed")
@@ -149,11 +159,12 @@ class ServiceHealthRegressionTests(unittest.TestCase):
         self.assertFalse(result["active_traffic_observed"])
         self.assertFalse(result["restart_recommended"])
 
+    @patch("ai_agent.tools.service_health._firewall_interception_active", return_value=_FIREWALL_ACTIVE)
     @patch("ai_agent.tools.service_health._configured_rules", return_value=["main-telegram-community-ruleset"])
     @patch("ai_agent.tools.service_health.process_running", return_value=True)
     @patch("ai_agent.tools.service_health.dns_query", side_effect=_dns.__func__)
     @patch("ai_agent.tools.service_health._selectors")
-    def test_api_error_with_fakeip_does_not_recommend_restart(self, selectors, _dns_mock, _process_mock, _rules_mock):
+    def test_api_error_with_fakeip_does_not_recommend_restart(self, selectors, _dns_mock, _process_mock, _rules_mock, _firewall_mock):
         from ai_agent.errors import ServiceNotReady
 
         selectors.side_effect = ServiceNotReady("sing-box", "API unavailable")
@@ -162,6 +173,24 @@ class ServiceHealthRegressionTests(unittest.TestCase):
         self.assertEqual(result["status"], "indeterminate_needs_more_evidence")
         self.assertFalse(result["restart_recommended"])
         self.assertTrue(all(item["fakeip_observed"] for item in result["dns"]))
+
+    @patch("ai_agent.tools.service_health._firewall_interception_active", return_value={
+        "checked": True, "table_present": False, "tproxy_rule_present": False, "tproxy_port": None, "active": False,
+    })
+    @patch("ai_agent.tools.service_health._configured_rules", return_value=["main-telegram-community-ruleset"])
+    @patch("ai_agent.tools.service_health.process_running", return_value=True)
+    @patch("ai_agent.tools.service_health.dns_query", side_effect=_dns.__func__)
+    @patch("ai_agent.tools.service_health._selectors", return_value={"main-out": {"now": "Sweden"}})
+    @patch("ai_agent.tools.service_health._clash_request", return_value={"connections": []})
+    def test_firewall_interception_missing_with_fakeip_recommends_restart(
+        self, _clash_mock, _selectors_mock, _dns_mock, _process_mock, _rules_mock, _firewall_mock,
+    ):
+        result = netshift_service_health(None, {"service": "telegram"})
+
+        self.assertEqual(result["status"], "firewall_interception_missing")
+        self.assertFalse(result["configured_via_netshift"])
+        self.assertTrue(result["restart_recommended"])
+        self.assertFalse(result["firewall"]["active"])
 
 
 class PromptRegressionTests(unittest.TestCase):

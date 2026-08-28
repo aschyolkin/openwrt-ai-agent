@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -138,4 +139,53 @@ def sys_resource_usage(context, arguments: dict[str, Any]) -> dict[str, Any]:
 )
 def backup_list(context, arguments: dict[str, Any]) -> dict[str, Any]:
     return {"backups": context.backups.list(arguments.get("limit", 30))}
+
+
+@tool(
+    name="agent_audit_log",
+    description=(
+        "Прочитать журнал событий mutating-действий агента (что менялось, когда, статус, "
+        "результат проверки). Не содержит ручных изменений по SSH — только действия агента."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "contains": {"type": "string", "maxLength": 128},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 20000},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        },
+        "additionalProperties": False,
+    },
+    sensitivity="medium",
+)
+def agent_audit_log(context, arguments: dict[str, Any]) -> dict[str, Any]:
+    path = Path(context.config.audit_path)
+    entries: list[dict[str, Any]] = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    entries.sort(key=lambda entry: entry.get("ts", 0), reverse=True)
+    for entry in entries:
+        ts = entry.get("ts")
+        if isinstance(ts, (int, float)):
+            entry["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    contains = str(arguments.get("contains", ""))
+    if contains:
+        needle = contains.casefold()
+        entries = [entry for entry in entries if needle in json.dumps(entry, ensure_ascii=False).casefold()]
+    offset = int(arguments.get("offset", 0))
+    limit = int(arguments.get("limit", 100))
+    page = entries[offset:offset + limit]
+    next_offset = offset + len(page)
+    return {
+        "entries": page, "total": len(entries), "offset": offset,
+        "next_offset": next_offset if next_offset < len(entries) else None,
+        "note": "Только действия самого агента (plan/confirm/apply/verify/rollback). Ручные изменения по SSH сюда не попадают.",
+    }
 

@@ -9,10 +9,38 @@ from ..adapters import state_hashes
 from ..errors import AgentError
 from ..models import MutationPlan, VerificationResult
 from ..registry import ExecClass, tool
-from .common import DOMAIN_PATTERN, dns_query, normalize_domain, service_action, service_status
+from .common import DOMAIN_PATTERN, dns_query, nft_ruleset_text, normalize_domain, service_action, service_status
 
 
 EMPTY_OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+def _agh_blocked_verdict(adguard: dict[str, Any], singbox: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (blocked_by_agh, resolves_direct) from two dns_query results."""
+    blocked_by_agh = not adguard["addresses"] or all(
+        address in {"0.0.0.0", "127.0.0.1"} for address in adguard["addresses"]
+    )
+    resolves_direct = bool(singbox["addresses"]) and not all(address == "0.0.0.0" for address in singbox["addresses"])
+    return blocked_by_agh, resolves_direct
+
+
+def _agh_filter_matches(domain: str, limit: int = 10) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    filter_root = Path("/opt/adguardhome/data/filters")
+    if filter_root.is_dir():
+        for file_path in sorted(filter_root.glob("*.txt")):
+            try:
+                with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for number, line in enumerate(handle, 1):
+                        if domain in line.lower():
+                            matches.append({"file": file_path.name, "line": number, "rule": line.strip()[:300]})
+                            if len(matches) >= limit:
+                                break
+            except OSError:
+                continue
+            if len(matches) >= limit:
+                break
+    return matches
 
 
 @tool(name="agh_service_status", description="Проверить состояние AdGuardHome.", parameters=EMPTY_OBJECT)
@@ -64,28 +92,72 @@ def agh_check_domain_blocked(context, arguments: dict[str, Any]) -> dict[str, An
     domain = normalize_domain(arguments["domain"])
     adguard = dns_query(context, domain, "10.110.112.1", 53)
     singbox = dns_query(context, domain, "127.0.0.42", 53)
-    blocked_answer = not adguard["addresses"] or all(address in {"0.0.0.0", "127.0.0.1"} for address in adguard["addresses"])
-    direct_answer = bool(singbox["addresses"]) and not all(address == "0.0.0.0" for address in singbox["addresses"])
-    matches = []
-    filter_root = Path("/opt/adguardhome/data/filters")
-    if filter_root.is_dir():
-        for file_path in sorted(filter_root.glob("*.txt")):
-            try:
-                with file_path.open("r", encoding="utf-8", errors="replace") as handle:
-                    for number, line in enumerate(handle, 1):
-                        if domain in line.lower():
-                            matches.append({"file": file_path.name, "line": number, "rule": line.strip()[:300]})
-                            if len(matches) >= 10:
-                                break
-            except OSError:
-                continue
-            if len(matches) >= 10:
-                break
+    blocked_answer, direct_answer = _agh_blocked_verdict(adguard, singbox)
+    matches = _agh_filter_matches(domain)
     return {
         "domain": domain, "blocked_by_actual_dns_test": blocked_answer and direct_answer,
         "adguard": adguard, "singbox_direct": singbox,
         "filter_matches_explanatory_only": matches,
         "filter_match_is_not_source_of_truth": True,
+    }
+
+
+@tool(
+    name="agh_diagnose_domain",
+    description=(
+        "Диагностическая воронка для домена через AdGuardHome: сервис AGH, активность DNS-перехвата "
+        "firewall (!fw4: Intercept-DNS), DNS-тест через AGH и напрямую. Различает 'AGH не отвечает', "
+        "'клиенты обходят AGH (DNS-перехват не активен)', 'домен блокируется фильтром AGH' и "
+        "'домен не резолвится нигде' — вместо одного плоского ответа."
+    ),
+    parameters={
+        "type": "object", "properties": {"domain": {"type": "string", "pattern": DOMAIN_PATTERN, "maxLength": 253}},
+        "required": ["domain"], "additionalProperties": False,
+    },
+    sensitivity="medium",
+    network_side_effect="diagnostic_dns_and_local_reads",
+)
+def agh_diagnose_domain(context, arguments: dict[str, Any]) -> dict[str, Any]:
+    domain = normalize_domain(arguments["domain"])
+
+    agh_running = bool(service_status(context, "adguardhome")["running"])
+    dns_intercept_active = "!fw4: Intercept-DNS" in nft_ruleset_text(context)
+
+    adguard = dns_query(context, domain, "10.110.112.1", 53)
+    singbox_direct = dns_query(context, domain, "127.0.0.42", 53)
+    blocked_by_agh, resolves_direct = _agh_blocked_verdict(adguard, singbox_direct)
+    filter_matches = _agh_filter_matches(domain)
+
+    if not agh_running:
+        status = "adguardhome_down"
+    elif not dns_intercept_active:
+        status = "dns_interception_missing"
+    elif blocked_by_agh and resolves_direct:
+        status = "blocked_by_agh_filter"
+    elif blocked_by_agh and not resolves_direct:
+        status = "domain_unresolvable_everywhere"
+    elif not blocked_by_agh:
+        status = "resolves_normally"
+    else:
+        status = "indeterminate_needs_more_evidence"
+
+    return {
+        "domain": domain,
+        "status": status,
+        "adguardhome_running": agh_running,
+        "dns_interception_active": dns_intercept_active,
+        "blocked_by_agh": blocked_by_agh,
+        "resolves_direct": resolves_direct,
+        "adguard": adguard,
+        "singbox_direct": singbox_direct,
+        "filter_matches_explanatory_only": filter_matches,
+        "filter_match_is_not_source_of_truth": True,
+        "interpretation": (
+            "AGH не отвечает — это отказ сервиса, а не блокировка домена. "
+            "Отсутствие DNS-перехвата (!fw4: Intercept-DNS) означает, что LAN-клиенты могут резолвить "
+            "домены напрямую через свой DNS, минуя AGH — это не то же самое, что 'AGH не блокирует домен'. "
+            "grep по фильтрам AGH — только пояснение, не источник истины: см. blocked_by_agh."
+        ),
     }
 
 
