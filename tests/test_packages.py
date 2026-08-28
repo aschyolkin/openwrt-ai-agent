@@ -77,6 +77,28 @@ class PackageToolTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             sys_package_remove(self.context, {"package": "coreutils-whoami"})
 
+    def test_remove_rejects_protected_packages(self):
+        self.runner.installed = True
+        for package in (
+            "python3", "python3-sqlite3", "python3-ubus", "python3-uci", "libpython3-3.13",
+            "dropbear", "openssh-server", "openssh-sftp-server",
+            "apk", "apk-tools", "apk-mbedtls",
+            "uci", "libuci20250120", "libuci-lua",
+            "ubus", "ubusd", "libubus20251202", "libubus-lua",
+            "procd", "procd-seccomp", "procd-ujail",
+            "busybox", "base-files", "kernel", "firewall4",
+        ):
+            calls_before = len(self.runner.calls)
+            with self.assertRaises(ValidationError, msg=package):
+                sys_package_remove(self.context, {"package": package})
+            self.assertEqual(len(self.runner.calls), calls_before, f"{package} should be rejected before touching apk")
+
+    def test_remove_allows_unprotected_lookalikes(self):
+        self.runner.installed = True
+        for package in ("openssh-client", "luci-app-firewall", "coreutils-whoami"):
+            plan = sys_package_remove(self.context, {"package": package})
+            self.assertIn(package, plan.summary)
+
 
 if __name__ == "__main__":
     unittest.main()

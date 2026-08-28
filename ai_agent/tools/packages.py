@@ -16,6 +16,18 @@ from ..registry import ExecClass, tool
 _PACKAGE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9+_.-]{0,127}")
 _APK_WORLD = "/etc/apk/world"
 
+# Packages this agent must never remove: SSH access, its own Python runtime,
+# apk itself, UCI/UBus (everything else is built on them), procd and the base
+# OS. Losing any of these either strands the router (no remote access) or
+# breaks the agent while it's mid-action. Package names carry version suffixes
+# on this OpenWrt build (e.g. libuci20250120), so this matches by prefix.
+_PROTECTED_PACKAGE = re.compile(
+    r"^(lib)?python3(-[a-z0-9_.+-]+)?$|^dropbear$|^openssh-(server|sftp-server)$|"
+    r"^apk(-[a-z0-9_.+-]+)?$|^u(ci|bus)(d)?$|^lib(uci|ubus)[a-z0-9._-]*$|"
+    r"^procd([a-z0-9_.+-]*)?$|^busybox$|^base-files$|^kernel$|^firewall4$",
+    re.IGNORECASE,
+)
+
 
 def _apk() -> str:
     return first_executable(("/usr/bin/apk",))
@@ -159,6 +171,11 @@ def sys_package_remove(context, arguments: dict[str, Any]) -> MutationPlan:
     package = str(arguments["package"])
     if not _PACKAGE_NAME.fullmatch(package):
         raise ValidationError("Недопустимое имя пакета")
+    if _PROTECTED_PACKAGE.match(package):
+        raise ValidationError(
+            "Пакет защищён от удаления: критичен для SSH-доступа, самого агента или базовой системы роутера",
+            {"package": package},
+        )
     if not _installed(context, package):
         raise ValidationError("Пакет не установлен", {"package": package})
     before = ["installed packages\n", f"+ {package} (installed)\n"]
