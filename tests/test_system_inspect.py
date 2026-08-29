@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 import requests
 
@@ -12,7 +12,7 @@ from ai_agent.command import CommandRunner
 from ai_agent.errors import ValidationError
 from ai_agent.registry import ToolRegistry
 from ai_agent.tools import register_all
-from ai_agent.tools.netshift_singbox import _clash_request
+from ai_agent.tools.netshift_singbox import _clash_request, _netshift_config_verification
 from ai_agent.tools.service_health import netshift_service_health
 from ai_agent.tools.system_inspect import _page_text, _redact_uci_sections
 
@@ -108,6 +108,23 @@ class AdapterRegressionTests(unittest.TestCase):
         result = _clash_request(SimpleNamespace(http=HTTP()), "GET", "/proxies")
         self.assertEqual(result, {"proxies": {}})
         self.assertEqual(calls[-1], "http://10.110.112.1:9090/proxies")
+
+    @patch("ai_agent.tools.netshift_singbox.time.sleep")
+    @patch("ai_agent.tools.netshift_singbox.process_running", return_value=True)
+    @patch("builtins.open", new_callable=mock_open, read_data="{}")
+    def test_netshift_verifier_retries_transient_dns_readiness(self, _open, _process, sleep):
+        failed = {"ok": False, "addresses": [], "returncode": 9}
+        ready = {"ok": True, "addresses": ["198.18.1.10"], "returncode": 0}
+        with patch(
+            "ai_agent.tools.netshift_singbox.dns_query",
+            side_effect=[failed, failed, ready, ready],
+        ):
+            result = _netshift_config_verification(
+                SimpleNamespace(), "example.com", dns_attempts=2, dns_retry_delay=0,
+            )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.checks["dns_attempts"], 2)
+        sleep.assert_called_once_with(0.0)
 
 
 class ServiceHealthRegressionTests(unittest.TestCase):

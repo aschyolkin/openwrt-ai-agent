@@ -1,0 +1,84 @@
+#!/usr/bin/python3
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from typing import Any
+
+
+SERVICES = {
+    "core": "ai-agent",
+    "telegram": "ai-agent-telegram",
+}
+
+
+def run_fixed(argv: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def service_running(name: str) -> bool:
+    try:
+        result = run_fixed([f"/etc/init.d/{name}", "status"], 5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "running"
+
+
+def status() -> dict[str, Any]:
+    health: dict[str, Any]
+    try:
+        result = run_fixed(["/usr/bin/ai-agent-cli", "--json", "health"], 8)
+        parsed = json.loads(result.stdout) if result.returncode == 0 else None
+        health = parsed if isinstance(parsed, dict) else {
+            "ok": False,
+            "status": "unavailable",
+        }
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
+        health = {"ok": False, "status": "unavailable"}
+    return {
+        "ok": True,
+        "services": {
+            key: {"running": service_running(service)}
+            for key, service in SERVICES.items()
+        },
+        "health": health,
+    }
+
+
+def restart(target: str) -> dict[str, Any]:
+    service = SERVICES.get(target)
+    if service is None:
+        return {"ok": False, "error": "invalid_target"}
+    try:
+        result = run_fixed([f"/etc/init.d/{service}", "restart"], 30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"ok": False, "error": "restart_failed", "target": target}
+    return {
+        "ok": result.returncode == 0,
+        "error": None if result.returncode == 0 else "restart_failed",
+        "target": target,
+    }
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["status"]:
+        payload = status()
+    elif len(args) == 2 and args[0] == "restart":
+        payload = restart(args[1])
+    else:
+        payload = {"ok": False, "error": "invalid_action"}
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return 0 if payload.get("ok") else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

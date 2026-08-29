@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -268,7 +269,10 @@ def _add_domain_apply(context, plan: MutationPlan) -> dict[str, Any]:
     return {"uci": f"netshift.{section}.user_domains_text", "domain": plan.prepared["domain"], "netshift": reload_result, "adguardhome": agh_result}
 
 
-def _netshift_config_verification(context, domain: str | None = None) -> VerificationResult:
+def _netshift_config_verification(
+    context, domain: str | None = None, *, dns_attempts: int = 3,
+    dns_retry_delay: float = 1.0,
+) -> VerificationResult:
     checks: dict[str, Any] = {}
     try:
         with open("/etc/sing-box/config.json", "r", encoding="utf-8") as handle:
@@ -279,11 +283,25 @@ def _netshift_config_verification(context, domain: str | None = None) -> Verific
         checks["config_error"] = str(exc)[:300]
     checks["singbox_process"] = process_running("sing-box")
     if domain:
-        direct_dns = dns_query(context, domain.lstrip("*."), "127.0.0.42", 53)
-        lan_dns = dns_query(context, domain.lstrip("*."), "10.110.112.1", 53)
+        attempts_used = 0
+        direct_dns: dict[str, Any] = {}
+        lan_dns: dict[str, Any] = {}
+        fakeip = False
+        for attempt in range(max(1, dns_attempts)):
+            attempts_used = attempt + 1
+            direct_dns = dns_query(context, domain.lstrip("*."), "127.0.0.42", 53)
+            lan_dns = dns_query(context, domain.lstrip("*."), "10.110.112.1", 53)
+            fakeip = any(
+                is_fakeip(address)
+                for address in direct_dns["addresses"] + lan_dns["addresses"]
+            )
+            if fakeip or attempt + 1 >= max(1, dns_attempts):
+                break
+            time.sleep(max(0.0, dns_retry_delay))
         checks["singbox_dns"] = direct_dns
         checks["lan_dns"] = lan_dns
-        checks["fakeip"] = any(is_fakeip(address) for address in direct_dns["addresses"] + lan_dns["addresses"])
+        checks["fakeip"] = fakeip
+        checks["dns_attempts"] = attempts_used
     ok = bool(checks.get("singbox_config_json") and checks.get("singbox_process") and (domain is None or checks.get("fakeip")))
     return VerificationResult(ok, checks, "netshift/sing-box прошёл проверку" if ok else "Проверка netshift/sing-box не пройдена")
 
@@ -397,4 +415,3 @@ def netshift_reload(context, arguments: dict[str, Any]) -> MutationPlan:
         uci_packages=["netshift"],
         services=["netshift", "sing-box", "adguardhome"], verifier="singbox_json+process",
     )
-

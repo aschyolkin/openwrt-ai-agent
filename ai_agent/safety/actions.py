@@ -111,6 +111,57 @@ class ActionManager:
                 return {"ok": True, "action_id": action_id, "state": "rollback_declined"}
             return self._rollback(action)
 
+    def reverify(self, session_id: str, action_id: str) -> dict[str, Any]:
+        """Repeat only the deterministic verifier for an applied action.
+
+        This is intentionally not an apply retry: no configuration or runtime
+        state is changed. It handles transient post-reload readiness failures
+        without forcing the user to either undo a now-working change or leave
+        the action recorded as a failed verification forever.
+        """
+        with self._process_lock:
+            action = self._owned_action(session_id, action_id)
+            if action["state"] != "rollback_pending":
+                raise AgentError("invalid_action_state", f"Повторная проверка недоступна в состоянии {action['state']}")
+            spec = self.registry.get(action["tool_name"])
+            assert spec.verifier is not None
+            plan = MutationPlan(**action["plan"])
+            lock_file = self._lock_file()
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                verification = spec.verifier(self.context, plan)
+                error = None if verification.ok else {"verification": verification.to_dict()}
+                if verification.ok:
+                    if not self.sessions.transition(action_id, "rollback_pending", "verified"):
+                        raise AgentError("action_race", "Состояние действия изменилось параллельно")
+                    if action.get("backup_dir"):
+                        self.backups.update_state(
+                            action["backup_dir"], "verified",
+                            {"verification": sanitize(verification.to_dict()), "reverified": True},
+                        )
+                    self._audit("reverified", action_id, {"verification": sanitize(verification.to_dict())})
+                    return {
+                        "ok": True, "action_id": action_id, "state": "verified",
+                        "verification": verification.to_dict(),
+                        "message": verification.message or "Повторная проверка успешно пройдена",
+                    }
+                self.sessions.transition(
+                    action_id, "rollback_pending", "rollback_pending", error=error,
+                )
+                if action.get("backup_dir"):
+                    self.backups.update_state(action["backup_dir"], "rollback_pending", sanitize(error or {}))
+                self._audit("reverify_failed", action_id, sanitize(error or {}))
+                return {
+                    "ok": False, "action_id": action_id, "state": "rollback_pending",
+                    "error": "verification_failed", "verification": verification.to_dict(),
+                    "message": "Повторная проверка не прошла; можно повторить её позже, откатить или оставить изменение",
+                }
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_file.close()
+
     def _apply(self, action_id: str) -> dict[str, Any]:
         action = self.sessions.get_action(action_id)
         assert action is not None

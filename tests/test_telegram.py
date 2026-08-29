@@ -1,3 +1,4 @@
+import traceback
 import unittest
 from unittest.mock import Mock
 
@@ -17,26 +18,34 @@ class TelegramAdapterTests(unittest.TestCase):
         self.assertEqual(client.callbacks[0]["callback_query_id"], "cb-1")
 
     def test_api_errors_do_not_expose_token(self):
-        token = "123456:secret-token-value"
+        token = "1234567890:AAGabcdefghijklmnopqrstuvwxyz_123456"
         session = Mock()
-        session.post.side_effect = requests.RequestException("boom")
+        session.post.side_effect = requests.RequestException(
+            f"failed URL https://api.telegram.org/bot{token}/sendMessage"
+        )
         client = TelegramBotClient(token, session=session)
         with self.assertRaises(TelegramError) as raised:
             client.send_message(587849205, "hello")
         self.assertNotIn(token, str(raised.exception))
+        rendered = "".join(
+            traceback.format_exception(
+                type(raised.exception), raised.exception, raised.exception.__traceback__
+            )
+        )
+        self.assertNotIn(token, rendered)
 
     def test_get_updates_normalizes_result(self):
         response = Mock(status_code=200)
         response.json.return_value = {"ok": True, "result": [{"update_id": 1}]}
         session = Mock()
         session.post.return_value = response
-        result = TelegramBotClient("123456:secret-token-value", session=session).get_updates(offset=2)
+        result = TelegramBotClient("1234567890:AAGabcdefghijklmnopqrstuvwxyz_123456", session=session).get_updates(offset=2)
         self.assertEqual(result, [{"update_id": 1}])
         self.assertEqual(session.post.call_args.kwargs["json"]["offset"], 2)
 
     def test_proxy_is_applied_to_session(self):
         session = Mock()
-        client = TelegramBotClient("123456:secret-token-value", session=session, proxy="http://127.0.0.1:2080")
+        client = TelegramBotClient("1234567890:AAGabcdefghijklmnopqrstuvwxyz_123456", session=session, proxy="http://127.0.0.1:2080")
         session.proxies.update.assert_called_once_with({"http": "http://127.0.0.1:2080", "https": "http://127.0.0.1:2080"})
 
 

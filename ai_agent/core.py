@@ -20,6 +20,7 @@ from .safety.actions import ActionManager
 from .safety.backup import BackupStore
 from .storage.metrics import MetricsStore
 from .storage.sessions import SessionStore
+from .telegram_state import read_telegram_health
 from .tools import register_all
 from .tools.backup import backup_restore
 
@@ -123,10 +124,26 @@ class AgentCore:
         )
         return result
 
+    def reverify(self, session_id: str, action_id: str) -> dict[str, Any]:
+        result = self.actions.reverify(session_id, action_id)
+        self.sessions.append_message(
+            session_id,
+            {"role": "user", "content": f"[local re-verification: action={action_id}]"},
+        )
+        return result
+
     def history(self, session_id: str, limit: int = 100) -> dict[str, Any]:
         return {"ok": True, "session_id": session_id, "messages": self.sessions.history(session_id, limit)}
 
     def health(self) -> dict[str, Any]:
+        active = self.sessions.active_action()
+        active_summary = None
+        if active is not None:
+            active_summary = {
+                "action_id": active["id"], "tool_name": active["tool_name"],
+                "state": active["state"], "created_at": active["created_at"],
+                "updated_at": active["updated_at"], "expires_at": active["expires_at"],
+            }
         return {
             "ok": True,
             "status": "ready" if self.orchestrator is not None else "degraded",
@@ -140,6 +157,8 @@ class AgentCore:
             "socket": self.config.socket_path,
             "native_bindings": {"uci": self.uci.native, "ubus": self.ubus.native},
             "tools": len(list(self.registry)),
+            "telegram": read_telegram_health(),
+            "active_action": active_summary,
             "startup_warnings": list(self.startup_warnings),
         }
 
@@ -168,6 +187,8 @@ class AgentCore:
             if not isinstance(params.get("approve"), bool):
                 raise AgentError("invalid_request", "approve должен быть boolean")
             return self.rollback(str(params.get("session_id", "")), str(params.get("action_id", "")), params["approve"])
+        if method == "reverify":
+            return self.reverify(str(params.get("session_id", "")), str(params.get("action_id", "")))
         if method == "history":
             return self.history(str(params.get("session_id", "")), int(params.get("limit", 100)))
         if method == "debug_uci":

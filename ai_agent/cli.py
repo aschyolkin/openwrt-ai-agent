@@ -98,6 +98,9 @@ def main() -> None:
     rollback.add_argument("session")
     rollback.add_argument("action")
     rollback.add_argument("--yes", action="store_true")
+    reverify = subparsers.add_parser("reverify")
+    reverify.add_argument("session")
+    reverify.add_argument("action")
     args = parser.parse_args()
     command = args.command or "chat"
     try:
@@ -112,6 +115,10 @@ def main() -> None:
             return
         if command == "uci-show":
             print_response(request(args.socket, "debug_uci", {"package": args.package}), args.json)
+            return
+        if command == "reverify":
+            result = request(args.socket, command, {"session_id": args.session, "action_id": args.action})
+            print_response(result, args.json)
             return
         if command in {"confirm", "rollback"}:
             result = request(args.socket, command, {"session_id": args.session, "action_id": args.action, "approve": args.yes})
@@ -131,4 +138,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

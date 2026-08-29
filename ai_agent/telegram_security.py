@@ -263,7 +263,6 @@ class TelegramUpdateGuard:
             return False, "missing_update_id", None
         if update_id in self._seen:
             return False, "duplicate_update", None
-        self._seen.append(update_id)
         chat_id = self._chat_id(update)
         if chat_id is None or chat_id not in self.allowed_chat_ids:
             return False, "chat_not_allowed", chat_id
@@ -278,7 +277,28 @@ class TelegramUpdateGuard:
         if len(events) >= self.rate_limit:
             return False, "rate_limited", chat_id
         events.append(now)
+        self._seen.append(update_id)
         return True, "accepted", chat_id
+
+    def release(self, update: dict[str, Any]) -> None:
+        """Release an accepted update after a transient processing failure.
+
+        Long polling will return it again because the durable offset was not
+        advanced. Removing both the deduplication marker and the rate-limit
+        event lets that retry follow the same validation path.
+        """
+        try:
+            update_id = int(update["update_id"])
+        except (KeyError, TypeError, ValueError):
+            return
+        try:
+            self._seen.remove(update_id)
+        except ValueError:
+            return
+        chat_id = self._chat_id(update)
+        events = self._events.get(chat_id) if chat_id is not None else None
+        if events:
+            events.pop()
 
     def session_id(self, chat_id: int) -> str:
         if chat_id not in self.allowed_chat_ids:

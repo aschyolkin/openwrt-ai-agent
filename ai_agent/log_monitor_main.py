@@ -11,6 +11,7 @@ import requests
 from .config import DEFAULT_COMPLEX_MODEL, load_secret
 from .llm_client import LLMClient
 from .log_monitor import LogMonitor, collect_logread
+from .redaction import redact_text
 from .telegram import TelegramBotClient
 from .telegram_main import _env
 
@@ -66,7 +67,8 @@ def main() -> None:
             # last_run_epoch в state-файле просто не обновится и трассировка нигде
             # не осядет (сислог на роутере — кольцевой буфер без файла).
             syslog.openlog("ai-agent-log-monitor", syslog.LOG_PID)
-            syslog.syslog(syslog.LOG_ERR, "run failed: " + traceback.format_exc().strip().replace("\n", " | "))
+            safe_traceback = redact_text(traceback.format_exc()).strip().replace("\n", " | ")
+            syslog.syslog(syslog.LOG_ERR, "run failed: " + safe_traceback)
             raise
 
 

@@ -1,0 +1,14 @@
+{
+  "luci-app-ai-agent": {
+    "description": "Grant safe status, service action and UCI access to AI Agent",
+    "read": {
+      "file": {
+        "/usr/libexec/ai-agent-luci": [ "exec" ]
+      },
+      "uci": [ "ai-agent" ]
+    },
+    "write": {
+      "uci": [ "ai-agent" ]
+    }
+  }
+}

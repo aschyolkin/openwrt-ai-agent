@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ai_agent.errors import ValidationError
-from ai_agent.redaction import redact_log_network_data, sanitize
+from ai_agent.redaction import redact_log_network_data, redact_text, sanitize
 from ai_agent.registry import ToolRegistry, tool
 
 
@@ -19,6 +19,17 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("10.110.112.1", value)
         self.assertNotIn("secret.example.com", value)
         self.assertNotIn("8.8.8.8", value)
+
+    def test_provider_tokens_are_removed_without_assignment_labels(self):
+        telegram = "1234567890:AAGabcdefghijklmnopqrstuvwxyz_123456"
+        yandex = "AQVNabcdefghijklmnopqrstuvwxyz_123456"
+        value = redact_text(
+            f"https://api.telegram.org/bot{telegram}/sendMessage key={yandex}"
+        )
+        self.assertNotIn(telegram, value)
+        self.assertNotIn(yandex, value)
+        self.assertIn("***redacted-telegram-token***", value)
+        self.assertIn("***redacted-yandex-key***", value)
 
 
 class RegistryTests(unittest.TestCase):
@@ -44,4 +55,3 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

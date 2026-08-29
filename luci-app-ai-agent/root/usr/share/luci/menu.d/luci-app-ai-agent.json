@@ -1,0 +1,14 @@
+{
+  "admin/services/ai-agent": {
+    "title": "AI Agent",
+    "order": 65,
+    "action": {
+      "type": "view",
+      "path": "ai-agent/overview"
+    },
+    "depends": {
+      "acl": [ "luci-app-ai-agent" ],
+      "uci": { "ai-agent": true }
+    }
+  }
+}

@@ -88,6 +88,33 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(rolled_back["state"], "rolled_back")
         self.assertEqual(self.target.read_text(encoding="utf-8"), "before\n")
 
+    def test_successful_reverify_keeps_change_and_marks_verified(self):
+        self.context.verifier_ok = False
+        pending = self.manager.plan(self.session, "test_mutation", {"value": "working\n"})
+        action_id = pending["action_id"]
+        failed = self.manager.confirm(self.session, action_id, True)
+        self.assertEqual(failed["state"], "rollback_pending")
+        self.context.verifier_ok = True
+
+        result = self.manager.reverify(self.session, action_id)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "verified")
+        self.assertEqual(self.target.read_text(encoding="utf-8"), "working\n")
+        self.assertIsNone(self.sessions.active_action())
+
+    def test_failed_reverify_remains_rollback_pending(self):
+        self.context.verifier_ok = False
+        pending = self.manager.plan(self.session, "test_mutation", {"value": "broken\n"})
+        action_id = pending["action_id"]
+        self.manager.confirm(self.session, action_id, True)
+
+        result = self.manager.reverify(self.session, action_id)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "rollback_pending")
+        self.assertEqual(self.sessions.active_action()["id"], action_id)
+
     def test_pending_action_globally_blocks_other_sessions_until_cancelled(self):
         pending = self.manager.plan(self.session, "test_mutation", {"value": "first\n"})
         second_session = self.sessions.ensure_session("s2")
@@ -111,6 +138,18 @@ class ActionTests(unittest.TestCase):
 
         self.assertEqual(recovered, [action_id])
         self.assertEqual(self.sessions.get_action(action_id)["state"], "manual_review")
+
+    def test_rollback_pending_survives_restart_recovery(self):
+        self.context.verifier_ok = False
+        pending = self.manager.plan(self.session, "test_mutation", {"value": "broken\n"})
+        action_id = pending["action_id"]
+        result = self.manager.confirm(self.session, action_id, True)
+        self.assertEqual(result["state"], "rollback_pending")
+
+        recovered = self.manager.recover_interrupted()
+
+        self.assertEqual(recovered, [])
+        self.assertEqual(self.sessions.get_action(action_id)["state"], "rollback_pending")
 
 
 if __name__ == "__main__":

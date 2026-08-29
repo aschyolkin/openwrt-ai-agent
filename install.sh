@@ -58,6 +58,31 @@ install_file 0755 "$SCRIPT_DIR/bin/ai-agent-maintenance" /usr/bin/ai-agent-maint
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-log-monitor" /usr/bin/ai-agent-log-monitor
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-metrics-sample" /usr/bin/ai-agent-metrics-sample
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-telegram" /usr/bin/ai-agent-telegram
+
+LUCI_APP_DIR="$SCRIPT_DIR/luci-app-ai-agent"
+if [ -d "$LUCI_APP_DIR" ] && [ -d /www/luci-static/resources ]; then
+	echo "==> installing LuCI app"
+	mkdir -p \
+		/www/luci-static/resources/view/ai-agent \
+		/usr/share/luci/menu.d \
+		/usr/share/rpcd/acl.d \
+		/usr/libexec
+	install_file 0644 \
+		"$LUCI_APP_DIR/htdocs/luci-static/resources/view/ai-agent/overview.js" \
+		/www/luci-static/resources/view/ai-agent/overview.js
+	install_file 0644 \
+		"$LUCI_APP_DIR/root/usr/share/luci/menu.d/luci-app-ai-agent.json" \
+		/usr/share/luci/menu.d/luci-app-ai-agent.json
+	install_file 0644 \
+		"$LUCI_APP_DIR/root/usr/share/rpcd/acl.d/luci-app-ai-agent.json" \
+		/usr/share/rpcd/acl.d/luci-app-ai-agent.json
+	install_file 0755 \
+		"$LUCI_APP_DIR/root/usr/libexec/ai-agent-luci" \
+		/usr/libexec/ai-agent-luci
+	rm -f /tmp/luci-indexcache.*.json
+	/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+fi
+
 install_file 0755 "$SCRIPT_DIR/etc/init.d/ai-agent" /etc/init.d/ai-agent
 install_file 0755 "$SCRIPT_DIR/etc/init.d/ai-agent-telegram" /etc/init.d/ai-agent-telegram
 

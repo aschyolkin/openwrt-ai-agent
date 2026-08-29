@@ -30,6 +30,32 @@ class TelegramWorkerTests(unittest.TestCase):
         worker.handle_update({"update_id": 3, "message": {"chat": {"id": 587849205}, "text": "change"}})
         self.assertEqual(client.sent[0]["text"], "Подтвердите действие:\n&lt;danger&gt;.")
         self.assertIn("confirm:a1:yes", str(client.sent[0]["reply_markup"]))
+        self.assertNotIn("rollback:a1:yes", str(client.sent[0]["reply_markup"]))
+
+    def test_rollback_pending_gets_reverify_and_recovery_buttons(self):
+        client = FakeTelegramClient()
+        calls = []
+        worker = TelegramWorker(
+            client,
+            lambda method, params: calls.append((method, params)) or {
+                "ok": False, "state": "rollback_pending", "action_id": "a1",
+                "message": "Проверка пока не прошла",
+            },
+            frozenset({587849205}),
+        )
+        update = {
+            "update_id": 4,
+            "callback_query": {
+                "id": "cb", "data": "reverify:a1:yes",
+                "message": {"chat": {"id": 587849205}},
+            },
+        }
+        worker.handle_update(update)
+        self.assertEqual(calls[0], ("reverify", {"session_id": "telegram:587849205", "action_id": "a1"}))
+        markup = str(client.sent[0]["reply_markup"])
+        self.assertIn("reverify:a1:yes", markup)
+        self.assertIn("rollback:a1:yes", markup)
+        self.assertIn("rollback:a1:no", markup)
 
     def test_verified_action_is_human_readable_and_hides_internal_json(self):
         response = {

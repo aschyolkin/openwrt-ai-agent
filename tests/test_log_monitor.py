@@ -43,6 +43,24 @@ class LogMonitorTests(unittest.TestCase):
             self.assertNotIn("8.8.8.8", sent_payload)
             self.assertEqual(len(telegram.sent), 1)
 
+    def test_telegram_token_in_transport_trace_is_redacted_before_llm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            token = "1234567890:AAGabcdefghijklmnopqrstuvwxyz_123456"
+            llm = Mock()
+            llm.chat.return_value = {"content": '{"severity":"none","title":"","summary":"","evidence":[],"recommended_actions":[]}'}
+            monitor = LogMonitor(
+                llm, FakeTelegramClient(), [587849205],
+                str(Path(temporary) / "state.json"),
+            )
+            line = (
+                "Fri Aug 28 11:00:00 daemon.err ProxyError: failed URL "
+                f"https://api.telegram.org/bot{token}/sendMessage"
+            )
+            monitor.run([line], NOW)
+            sent_payload = llm.chat.call_args.args[0][1]["content"]
+            self.assertNotIn(token, sent_payload)
+            self.assertIn("***redacted-telegram-token***", sent_payload)
+
     def test_critical_fallback_alerts_when_llm_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             llm = Mock()

@@ -39,6 +39,19 @@ ai-agent-cli chat 'какая нода активна в ai_section?'
 
 `install.sh` идемпотентен: обновляет код и init-скрипт, но сохраняет существующие `/etc/config/ai-agent`, `/etc/ai-agent/system_prompt.md`, секрет и `/var/lib/ai-agent`. API-ключ можно передать только файлом через `--secret-file`; аргумент с самим ключом намеренно не поддерживается.
 
+## LuCI
+
+После установки страница агента доступна в **Сервисы → AI Agent** или напрямую:
+
+```text
+http://<адрес-роутера>/cgi-bin/luci/admin/services/ai-agent
+```
+
+На странице видны состояние Core и Telegram, выбранные модели, LLM routing и
+текущее действие. Там же можно менять основные несекретные UCI-настройки и
+перезапускать только Core либо Telegram. API-ключи, токен Telegram и пути к
+секретам намеренно не показываются и не редактируются через LuCI.
+
 ## Core API
 
 MVP слушает JSON Lines на Unix-сокете `/var/run/ai-agent.sock` с правами `0600 root:root`. Запрос:
@@ -47,7 +60,22 @@ MVP слушает JSON Lines на Unix-сокете `/var/run/ai-agent.sock` с
 {"method":"chat","params":{"session_id":"optional","message":"проверь chat.z.ai"}}
 ```
 
-Методы: `chat`, `confirm`, `rollback`, `history`, `health`. `debug_uci` доступен CLI/root-клиенту, но не зарегистрирован как LLM tool. Переход к HTTP в MVP намеренно отсутствует.
+Методы: `chat`, `confirm`, `rollback`, `reverify`, `history`, `health`.
+`debug_uci` доступен CLI/root-клиенту, но не зарегистрирован как LLM tool. Переход
+к HTTP в MVP намеренно отсутствует.
+
+## Telegram worker
+
+Long polling хранит подтверждённый `offset` в
+`/var/lib/ai-agent/telegram-offset.json` с правами `0600`. Offset сдвигается только
+после полной обработки update и успешной отправки ответа. Подготовленный Core/LLM-ответ
+временно сохраняется там же до доставки: после сетевой ошибки или рестарта worker не
+повторяет LLM-вызов либо mutating-action. Для ответа из нескольких сообщений сохраняются
+отпечаток разбиения и число доставленных chunks, поэтому повтор продолжается с первой
+недоставленной части. Runtime-состояние доступно в
+`ai-agent-cli --json health` → `telegram`; `ready` означает успешный свежий
+long-poll, `degraded` содержит безопасную причину и текущий backoff, `stale` —
+отсутствие успешного polling более 90 секунд.
 
 ## Безопасность
 
@@ -57,7 +85,9 @@ MVP слушает JSON Lines на Unix-сокете `/var/run/ai-agent.sock` с
 - Результаты tools маркируются как недоверенные данные. Решение `read_only`/`mutating` и verifier задаются статически кодом.
 - Одновременно может существовать только одно mutating-действие. Перед apply проверяются TTL, `uci changes` и SHA-256 целевых файлов.
 - Для UCI сохраняются и `uci export`, и побайтовая копия `/etc/config/<package>`. Откат требует отдельного подтверждения.
-- `applying`/`rollback_pending`, обнаруженные после падения, переводятся в `manual_review` и не продолжаются автоматически.
+- Незавершённые `confirmed`/`applying` после падения переводятся в
+  `manual_review`; стабильный `rollback_pending` сохраняется для явных
+  `reverify`, отката или решения оставить изменение.
 - Секрет хранится только в `/etc/ai-agent/secrets.env` с правами `0600`.
 
 

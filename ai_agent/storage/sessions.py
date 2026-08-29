@@ -241,6 +241,15 @@ class SessionStore:
         result.pop("error_json", None)
         return result
 
+    def active_action(self) -> dict[str, Any] | None:
+        placeholders = ",".join("?" for _ in ACTIVE_STATES)
+        with self._lock:
+            row = self.connection.execute(
+                f"SELECT id FROM actions WHERE state IN ({placeholders}) ORDER BY created_at LIMIT 1",
+                ACTIVE_STATES,
+            ).fetchone()
+        return self.get_action(row["id"]) if row else None
+
     def transition(
         self,
         action_id: str,
@@ -265,13 +274,13 @@ class SessionStore:
         now = int(time.time())
         with self._lock, self.connection:
             rows = self.connection.execute(
-                "SELECT id FROM actions WHERE state IN ('confirmed','applying','applied','failed','rollback_pending')"
+                "SELECT id FROM actions WHERE state IN ('confirmed','applying','applied','failed')"
             ).fetchall()
             ids = [row["id"] for row in rows]
             if ids:
                 self.connection.execute(
                     "UPDATE actions SET state='manual_review', updated_at=? "
-                    "WHERE state IN ('confirmed','applying','applied','failed','rollback_pending')", (now,)
+                    "WHERE state IN ('confirmed','applying','applied','failed')", (now,)
                 )
         return ids
 
