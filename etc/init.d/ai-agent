@@ -29,6 +29,23 @@ stop_service() {
 	[ -S "$socket_path" ] && rm -f "$socket_path"
 }
 
+sync_log_monitor_cron() {
+	local hours CRON=/etc/crontabs/root
+	[ -f "$CRON" ] || return 0
+	config_load ai-agent
+	config_get hours main log_monitor_interval_hours 4
+	case "$hours" in ''|*[!0-9]*) hours=4 ;; esac
+	[ "$hours" -ge 1 ] 2>/dev/null && [ "$hours" -le 24 ] 2>/dev/null || hours=4
+	sed -i '/# ai-agent-log-monitor$/d' "$CRON"
+	echo "23 */$hours * * * /usr/bin/ai-agent-log-monitor # ai-agent-log-monitor" >> "$CRON"
+	/etc/init.d/cron restart >/dev/null 2>&1 || true
+}
+
+reload_service() {
+	sync_log_monitor_cron
+	restart
+}
+
 service_triggers() {
 	procd_add_reload_trigger ai-agent
 }

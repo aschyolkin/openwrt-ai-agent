@@ -117,8 +117,13 @@ CRON=/etc/crontabs/root
 touch "$CRON"
 sed -i '/# ai-agent-maintenance$/d' "$CRON"
 echo '17 4 * * * /usr/bin/ai-agent-maintenance # ai-agent-maintenance' >> "$CRON"
+# Интервал настраивается через UCI ai-agent.main.log_monitor_interval_hours
+# (вкладка Runtime в LuCI); при недопустимом/отсутствующем значении — 4 часа.
+log_monitor_hours="$(uci -q get ai-agent.main.log_monitor_interval_hours)"
+case "$log_monitor_hours" in ''|*[!0-9]*) log_monitor_hours=4 ;; esac
+[ "$log_monitor_hours" -ge 1 ] 2>/dev/null && [ "$log_monitor_hours" -le 24 ] 2>/dev/null || log_monitor_hours=4
 sed -i '/# ai-agent-log-monitor$/d' "$CRON"
-echo '23 */4 * * * /usr/bin/ai-agent-log-monitor # ai-agent-log-monitor' >> "$CRON"
+echo "23 */$log_monitor_hours * * * /usr/bin/ai-agent-log-monitor # ai-agent-log-monitor" >> "$CRON"
 sed -i '/# ai-agent-metrics-sample$/d' "$CRON"
 echo '*/10 * * * * /usr/bin/ai-agent-metrics-sample # ai-agent-metrics-sample' >> "$CRON"
 /etc/init.d/cron restart >/dev/null 2>&1 || true

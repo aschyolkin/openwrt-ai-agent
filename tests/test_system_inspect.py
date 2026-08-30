@@ -228,6 +228,18 @@ class PromptRegressionTests(unittest.TestCase):
         self.assertIn("/usr/bin/ai-agent-maintenance # ai-agent-maintenance", installer)
         self.assertNotIn("ai-agent-cli --json health >/dev/null 2>&1 # ai-agent-maintenance", installer)
 
+    def test_log_monitor_interval_is_uci_configurable(self):
+        root = Path(__file__).resolve().parents[1]
+        installer = (root / "install.sh").read_text(encoding="utf-8")
+        default_config = (root / "etc/config/ai-agent").read_text(encoding="utf-8")
+        init_script = (root / "etc/init.d/ai-agent").read_text(encoding="utf-8")
+
+        self.assertIn("option log_monitor_interval_hours '4'", default_config)
+        self.assertIn("uci -q get ai-agent.main.log_monitor_interval_hours", installer)
+        self.assertIn('echo "23 */$log_monitor_hours * * * /usr/bin/ai-agent-log-monitor # ai-agent-log-monitor"', installer)
+        self.assertIn("sync_log_monitor_cron", init_script)
+        self.assertIn("reload_service", init_script)
+
     def test_cron_invoked_bin_scripts_set_pythonpath(self):
         # Скрипты, запускаемые напрямую через `python3 -m ai_agent.<module>` из
         # cron (не через ai-agent-cli и не через procd, который сам передаёт env),

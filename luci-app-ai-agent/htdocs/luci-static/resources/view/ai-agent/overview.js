@@ -172,6 +172,12 @@ return view.extend({
 		o.default = '30';
 		o.rmempty = false;
 
+		o = s.taboption('runtime', form.Value, 'log_monitor_interval_hours', _('Интервал анализа логов, часов'));
+		o.datatype = 'range(1,24)';
+		o.default = '4';
+		o.rmempty = false;
+		o.description = _('Как часто фоновый анализ logread через LLM проверяет новые подозрительные записи и присылает алерт в Telegram.');
+
 		o = s.taboption('limits', form.Value, 'max_tool_loop_iterations', _('Максимум циклов tools'));
 		o.datatype = 'range(1,20)';
 		o.default = '8';

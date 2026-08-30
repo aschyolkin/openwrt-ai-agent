@@ -72,6 +72,7 @@ class LuciAppTests(unittest.TestCase):
             "conversation_max_chars",
             "tool_context_max_chars",
             "command_output_limit",
+            "log_monitor_interval_hours",
         ):
             self.assertIn("'%s'" % option, source)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", source)
