@@ -87,9 +87,82 @@ class LogMonitorTests(unittest.TestCase):
     def test_suspicious_filter_removes_expected_disconnect_noise(self):
         lines = [
             "Fri Aug 28 11:00:00 authpriv.err dropbear[1]: Exit root: Disconnect received",
+            "Fri Aug 28 11:00:30 cron.err crond[1]: USER root pid 2 cmd /usr/bin/ai-agent-metrics-sample",
             "Fri Aug 28 11:01:00 daemon.err sing-box failed",
         ]
         self.assertEqual(len(suspicious_lines(lines)), 1)
+
+    def test_netshift_maintenance_transients_are_suppressed_without_llm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            llm = Mock()
+            telegram = FakeTelegramClient()
+            monitor = LogMonitor(llm, telegram, [587849205], str(Path(temporary) / "state.json"))
+            lines = [
+                "Fri Aug 28 11:00:00 user.notice netshift: Stopped sing-box health monitor",
+                "Fri Aug 28 11:00:01 user.notice netshift: Stop sing-box",
+                "Fri Aug 28 11:00:02 user.notice AdGuardHome: [error] dnsproxy: exchange failed "
+                'upstream=127.0.0.42:53 err="connection refused"',
+                "Fri Aug 28 11:00:04 daemon.err ai-agent-telegram: Telegram polling failed; retry in 1s",
+                "Fri Aug 28 11:00:11 user.notice netshift: Started sing-box health monitor",
+            ]
+            result = monitor.run(lines, NOW, current_state={"sing_box": "running", "adguardhome": "running"})
+            self.assertEqual(result["maintenance_suppressed"], 2)
+            self.assertEqual(result["candidates"], 0)
+            self.assertFalse(result["alerted"])
+            llm.chat.assert_not_called()
+
+    def test_malformed_dns_burst_is_aggregated_short_and_skips_llm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            llm = Mock()
+            telegram = FakeTelegramClient()
+            monitor = LogMonitor(llm, telegram, [587849205], str(Path(temporary) / "state.json"))
+            lines = [
+                "Fri Aug 28 11:00:00 user.notice AdGuardHome: [error] dnsproxy: "
+                'unpacking udp packet err="bad question name: dns: bad rdata"'
+                for _ in range(120)
+            ]
+            result = monitor.run(lines, NOW, current_state={"adguardhome": "running"})
+            self.assertEqual(result["malformed_dns"], 120)
+            self.assertEqual(result["candidates"], 1)
+            self.assertTrue(result["alerted"])
+            llm.chat.assert_not_called()
+            alert = telegram.sent[0]["text"]
+            self.assertLessEqual(len(alert), 900)
+            self.assertIn("не критический сбой", alert)
+            self.assertNotIn("Что проверить:", alert)
+
+    def test_malformed_dns_warning_has_24_hour_category_cooldown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            llm = Mock()
+            telegram = FakeTelegramClient()
+            state_path = str(Path(temporary) / "state.json")
+            monitor = LogMonitor(llm, telegram, [587849205], state_path)
+            first = [
+                "Fri Aug 28 11:00:00 user.notice AdGuardHome: [error] dnsproxy: "
+                'unpacking udp packet err="bad question name: dns: bad rdata"'
+                for _ in range(100)
+            ]
+            second = [
+                "Fri Aug 28 17:00:00 user.notice AdGuardHome: [error] dnsproxy: "
+                'unpacking udp packet err="bad question name: dns: buffer size too small"'
+                for _ in range(110)
+            ]
+            self.assertTrue(monitor.run(first, NOW, {"adguardhome": "running"})["alerted"])
+            later = datetime(2026, 8, 28, 18, 0, 0)
+            self.assertFalse(monitor.run(second, later, {"adguardhome": "running"})["alerted"])
+            self.assertEqual(len(telegram.sent), 1)
+
+    def test_alert_formatter_enforces_small_hard_limit(self):
+        alert = LogMonitor._format_alert({
+            "severity": "warning",
+            "title": "T" * 500,
+            "summary": "S" * 1000,
+            "evidence": ["E" * 500 for _ in range(8)],
+            "recommended_actions": ["A" * 500 for _ in range(8)],
+        })
+        self.assertLessEqual(len(alert), 900)
+        self.assertNotIn("E" * 161, alert)
+        self.assertNotIn("A" * 161, alert)
 
 
 if __name__ == "__main__":
