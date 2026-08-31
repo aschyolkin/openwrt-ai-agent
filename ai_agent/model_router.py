@@ -38,6 +38,14 @@ READ_ONLY_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+# "проверь"/"статус" и т.п. сами по себе не несут темы — часто это короткое
+# продолжение диалога ("проверь ещё раз"), которое молча теряет контекст
+# предыдущей реплики при пословной маршрутизации. Раньше такие сообщения
+# получали общий (и часто не по теме) набор из 3 tools на дешёвой модели —
+# из-за этого модель однажды уверенно ответила про несуществующие ноды VPN,
+# имея доступ только к sys_resource_usage/net_interfaces_status/sys_inspect.
+GENERIC_CHECK_WORDS = re.compile(r"статус|состояние|покажи|проверь", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class ModelRoute:
@@ -69,7 +77,7 @@ def read_only_tools_for(message: str, limit: int = 5) -> tuple[str, ...]:
         add("net_dns_check", "agh_service_status", "agh_check_domain_blocked", "agh_config_read", "agh_diagnose_domain")
     if re.search(r"telegram|телеграм|discord|youtube|chatgpt|claude|github", text):
         add("netshift_service_health", "netshift_check_domain_routing", "net_dns_check", "singbox_connections")
-    if re.search(r"netshift|sing.box|vpn|прокс", text):
+    if re.search(r"netshift|sing.box|vpn|прокс|нод|node|стран[ауеы]", text):
         add("netshift_service_health", "netshift_config_show", "netshift_check_domain_routing", "singbox_active_proxies", "singbox_connections")
     if re.search(r"zapret|nfqws|dpi", text):
         add("zapret_service_status", "zapret_config_show", "zapret_dpi_check", "zapret_logs_tail")
@@ -79,8 +87,6 @@ def read_only_tools_for(message: str, limit: int = 5) -> tuple[str, ...]:
         add("backup_list")
     if re.search(r"аудит|audit|что мен[яи]|истори[яи] измен|что дела(л|ли)|что мы дела", text):
         add("agent_audit_log")
-    if not tools and re.search(r"статус|состояние|покажи|проверь", text):
-        add("sys_resource_usage", "net_interfaces_status", "sys_inspect")
     return tuple(tools[:limit])
 
 
@@ -125,8 +131,13 @@ class ModelRouter:
                 )
             return ModelRoute(self.complex_client, "complex", "long_or_multiline")
         if READ_ONLY_HINTS.search(normalized):
+            tools = read_only_tools_for(normalized)
+            if not tools and GENERIC_CHECK_WORDS.search(normalized):
+                # Generic "проверь"/"статус" without any topic keyword — don't
+                # guess a narrow (possibly wrong-topic) tool set on the cheap
+                # model; give the strong model the full toolset instead.
+                return ModelRoute(self.complex_client, "complex", "read_only_generic_check_without_topic")
             return ModelRoute(
-                self.simple_client, "simple_read_only", "recognized_read_only",
-                read_only_tools_for(normalized),
+                self.simple_client, "simple_read_only", "recognized_read_only", tools,
             )
         return ModelRoute(self.complex_client, "complex", "conservative_default")

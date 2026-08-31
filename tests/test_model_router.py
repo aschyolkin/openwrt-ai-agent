@@ -56,6 +56,33 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIsNone(route.tool_names)
         self.assertLessEqual(len(complex_read_only_tools_for("разберись почему всё странно")), 8)
 
+    def test_generic_check_without_topic_escalates_to_full_toolset(self):
+        # "проверь ещё раз" carries no topic keyword of its own — it's typically
+        # a follow-up continuing whatever was just discussed (e.g. a netshift/VPN
+        # node outage). Routing it to the cheap model with a guessed, wrong-topic
+        # tool set previously let the model answer confidently about nonexistent
+        # VPN nodes with zero relevant tools available.
+        for message in ("проверь ещё раз", "проверь", "покажи статус"):
+            with self.subTest(message=message):
+                route = self.router.select(message)
+                self.assertIs(route.client, self.complex)
+                self.assertEqual(route.route, "complex")
+                self.assertIsNone(route.tool_names)
+
+    def test_greeting_without_topic_still_uses_cheap_model_with_no_tools(self):
+        route = self.router.select("/start")
+        self.assertIs(route.client, self.simple)
+        self.assertEqual(route.tool_names, ())
+
+    def test_node_and_country_questions_get_netshift_tools(self):
+        # "нод"/"страну" alone used to fall through every topic branch (only
+        # "netshift|sing-box|vpn|прокс" triggered it) and land on the cheap
+        # model with zero tools, even though READ_ONLY_HINTS matched on "нод".
+        for message in ("какие ноды доступны для смены страны в ai_section?", "смени ноду на другую страну"):
+            with self.subTest(message=message):
+                tools = read_only_tools_for(message)
+                self.assertIn("singbox_active_proxies", tools)
+
 
 if __name__ == "__main__":
     unittest.main()
