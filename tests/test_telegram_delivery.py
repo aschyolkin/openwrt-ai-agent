@@ -183,7 +183,8 @@ class TelegramDeliveryTests(unittest.TestCase):
                 first_worker.run_once()
             self.assertEqual(len(first_client.sent), 1)
             state = TelegramOffsetStore(path).load_state()
-            self.assertEqual(state["pending"]["delivery"]["sent_chunks"], 1)
+            checkpoints = state["pending"]["deliveries"]
+            self.assertEqual(list(checkpoints.values()), [1])
 
             restarted_client = FakeTelegramClient(updates=[message_update(30)])
             restarted_worker = TelegramWorker(
@@ -200,6 +201,47 @@ class TelegramDeliveryTests(unittest.TestCase):
             self.assertEqual(len(core_calls), 1)
             state = TelegramOffsetStore(path).load_state()
             self.assertEqual(state["offset"], 31)
+
+            self.assertIsNone(state["pending"])
+    def test_second_callback_message_failure_does_not_duplicate_first_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "offset.json")
+            update = {
+                "update_id": 31,
+                "callback_query": {
+                    "id": "cb", "data": "confirm:a1:yes",
+                    "message": {"chat": {"id": CHAT_ID}},
+                },
+            }
+            response = {
+                "ok": True, "state": "verified", "message": "first",
+                "follow_up": {"ok": True, "status": "completed", "message": "second"},
+            }
+            first_client = FailOnAttemptClient(fail_on=2)
+            first_client.updates = [update]
+            core_calls = []
+            first_worker = TelegramWorker(
+                first_client,
+                lambda method, params: core_calls.append((method, params)) or response,
+                frozenset({CHAT_ID}), offset_path=path,
+            )
+            with self.assertRaises(TelegramError):
+                first_worker.run_once()
+            self.assertEqual([item["text"] for item in first_client.sent], ["Готово. first."])
+
+            restarted_client = FakeTelegramClient(updates=[update])
+            restarted_worker = TelegramWorker(
+                restarted_client,
+                lambda *_: self.fail("Core confirmation must not be repeated"),
+                frozenset({CHAT_ID}), offset_path=path,
+            )
+
+            self.assertEqual(restarted_worker.run_once(), 1)
+            self.assertEqual([item["text"] for item in restarted_client.sent], ["second"])
+            self.assertEqual(len(core_calls), 1)
+
+            state = TelegramOffsetStore(path).load_state()
+            self.assertEqual(state["offset"], 32)
             self.assertIsNone(state["pending"])
 
     def test_transport_error_does_not_trigger_unsafe_plain_resend(self):

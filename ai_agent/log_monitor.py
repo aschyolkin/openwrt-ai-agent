@@ -24,8 +24,12 @@ CRITICAL = re.compile(
     re.IGNORECASE,
 )
 EXPECTED_NOISE = re.compile(
+    # `ai-agent[123]: INFO ...` — the agent's own informational output. busybox
+    # syslog files anything a daemon writes to stderr under `daemon.err`, so
+    # SUSPICIOUS matches these on the word "err" even though nothing failed.
+    # Only INFO is dropped; the agent's WARNING/ERROR lines still get analysed.
     r"(dropbear.*Exit .*Disconnect received|crond.*USER root .* cmd |"
-    r"USER root .*ai-agent-maintenance|BrokenPipeError)",
+    r"USER root .*ai-agent-maintenance|BrokenPipeError|ai-agent\[\d+\]: INFO )",
     re.IGNORECASE,
 )
 NETSHIFT_STOP = re.compile(r"netshift:.*(?:Stopped sing-box health monitor|Stop sing-box)", re.IGNORECASE)
@@ -35,8 +39,18 @@ MAINTENANCE_TRANSIENT = re.compile(
     r"ai-agent-telegram.*Telegram polling failed)",
     re.IGNORECASE,
 )
+# Malformed DNS input is noise, not a fault: anything on udp/53 that is not a
+# DNS message lands here because fw4 redirects all LAN port 53 traffic to
+# AdGuardHome — a phone tunnelling QUIC over port 53 produces hundreds of these
+# per hour. AdGuardHome drops them and keeps serving, so they are counted in the
+# run metadata and never alerted on. Matches every dnsproxy unpack failure, not
+# just the "bad question name" wording.
 MALFORMED_DNS = re.compile(
-    r"AdGuardHome.*dnsproxy:.*(?:bad question name|reading msg proto=tcp.*unexpected EOF)",
+    r"AdGuardHome.*dnsproxy:.*(?:"
+    r"unpacking (?:(?:udp|tcp) )?(?:packet|msg)"
+    r"|bad question name"
+    r"|reading msg proto=tcp.*unexpected EOF"
+    r")",
     re.IGNORECASE,
 )
 
@@ -120,13 +134,11 @@ def prepare_candidates(lines: list[str], now: datetime, maximum: int = 120) -> t
             "buffer_too_small": small_buffer,
             "unexpected_eof": unexpected_eof,
         }
-        selected.append(
-            "AdGuardHome rejected malformed DNS input: "
-            f"total={len(malformed)}, bad_rdata={bad_rdata}, "
-            f"buffer_too_small={small_buffer}, unexpected_eof={unexpected_eof}, "
-            f"first={first.isoformat(timespec='seconds') if first else 'unknown'}, "
-            f"last={last.isoformat(timespec='seconds') if last else 'unknown'}"
-        )
+        # Deliberately not appended to `selected`: the counts stay in metadata
+        # (visible in the run result and cron log) but never reach the LLM or an
+        # alert, so a noisy client cannot wake the user up.
+        metadata["malformed_dns_first"] = first.isoformat(timespec="seconds") if first else "unknown"
+        metadata["malformed_dns_last"] = last.isoformat(timespec="seconds") if last else "unknown"
     return selected[-maximum:], metadata
 
 
@@ -202,27 +214,7 @@ class LogMonitor:
             **candidate_meta,
         }
         analysis: dict[str, Any] = {"severity": "none"}
-        only_malformed_dns = bool(candidate_meta["malformed_dns"]) and len(candidates) == 1
-        if only_malformed_dns:
-            count = int(candidate_meta["malformed_dns"])
-            if count >= 100:
-                types = candidate_meta["malformed_dns_types"]
-                analysis = {
-                    "severity": "warning",
-                    "title": "Некорректные DNS-запросы",
-                    "summary": (
-                        f"AdGuardHome отклонил {count} повреждённых запросов. "
-                        "DNS-сервис работает; это не критический сбой."
-                    ),
-                    "evidence": [
-                        f"bad rdata: {types['bad_rdata']}, короткий буфер: {types['buffer_too_small']}, "
-                        f"обрыв TCP: {types['unexpected_eof']}"
-                    ],
-                    "recommended_actions": ["Определить устройство-источник по временному захвату DNS-заголовков."],
-                    "_dedupe_key": "malformed_dns",
-                    "_dedupe_seconds": 86400,
-                }
-        elif candidates:
+        if candidates:
             try:
                 analysis = self._analysis(candidates, current_state)
             except Exception:

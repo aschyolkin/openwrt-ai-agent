@@ -6,9 +6,12 @@ import os
 import socket
 import time
 from typing import Any
+from .adapters import UCIAdapter, load_agent_config
+from .command import CommandRunner
+from .config import load_env_file
 
 from .redaction import redact_text
-from .telegram import TelegramBotClient, TelegramError
+from .telegram import DEFAULT_TELEGRAM_PROXY, TelegramBotClient, TelegramError
 from .telegram_state import (
     DEFAULT_TELEGRAM_HEALTH_PATH,
     DEFAULT_TELEGRAM_OFFSET_PATH,
@@ -19,16 +22,6 @@ from .telegram_worker import TelegramWorker
 
 LOG = logging.getLogger("ai-agent.telegram.main")
 MAX_CORE_RESPONSE_BYTES = 2 * 1024 * 1024
-
-
-def _env(path: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in open(path, encoding="utf-8"):
-        line = raw.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip()
-    return values
 
 
 def _read_core_response(client: socket.socket, maximum: int = MAX_CORE_RESPONSE_BYTES) -> dict[str, Any]:
@@ -74,17 +67,19 @@ def _retry_delay(exc: Exception, backoff: int) -> int:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    env = _env(os.environ.get("AI_AGENT_TELEGRAM_ENV", "/etc/ai-agent/telegram.env"))
+    config = load_agent_config(UCIAdapter(CommandRunner()))
+    env_path = os.environ.get("AI_AGENT_TELEGRAM_ENV", "/etc/ai-agent/telegram.env")
+    env = load_env_file(env_path)
     token = env.get("TELEGRAM_BOT_TOKEN", "")
     chats = frozenset(int(item.strip()) for item in env.get("TELEGRAM_ALLOWED_CHAT_IDS", "").split(",") if item.strip())
     if not token or not chats:
         raise SystemExit("Telegram token and allowlist are required")
-    client = TelegramBotClient(token, proxy=env.get("TELEGRAM_PROXY") or "http://10.110.112.1:2080")
+    client = TelegramBotClient(token, proxy=env.get("TELEGRAM_PROXY") or DEFAULT_TELEGRAM_PROXY)
     offset_path = env.get("TELEGRAM_OFFSET_PATH") or DEFAULT_TELEGRAM_OFFSET_PATH
     health_path = env.get("TELEGRAM_HEALTH_PATH") or DEFAULT_TELEGRAM_HEALTH_PATH
     worker = TelegramWorker(
         client,
-        lambda method, params: _core_request("/var/run/ai-agent.sock", method, params),
+        lambda method, params: _core_request(config.socket_path, method, params),
         chats,
         offset_path=offset_path,
     )

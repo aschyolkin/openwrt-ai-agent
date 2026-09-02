@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import syslog
 import traceback
+from pathlib import Path
 
 import requests
 
-from .config import DEFAULT_COMPLEX_MODEL, load_secret
+from .adapters import UCIAdapter, load_agent_config
+from .command import CommandRunner
+from .config import load_env_file, load_secret
 from .llm_client import LLMClient
 from .log_monitor import LogMonitor, collect_logread
 from .redaction import redact_text
-from .telegram import TelegramBotClient
-from .telegram_main import _env
+from .telegram import DEFAULT_TELEGRAM_PROXY, TelegramBotClient
 
 
 def _status(command: list[str]) -> str:
@@ -50,16 +53,23 @@ def main() -> None:
         except BlockingIOError:
             return
         try:
-            telegram_env = _env("/etc/ai-agent/telegram.env")
+            config = load_agent_config(UCIAdapter(CommandRunner()))
+            telegram_env = load_env_file(
+                os.environ.get("AI_AGENT_TELEGRAM_ENV", "/etc/ai-agent/telegram.env"),
+            )
             chats = [int(item.strip()) for item in telegram_env.get("TELEGRAM_ALLOWED_CHAT_IDS", "").split(",") if item.strip()]
-            api_key = load_secret("/etc/ai-agent/secrets.env")
+            api_key = load_secret(config.secrets_path)
             http = requests.Session()
             http.trust_env = False
-            llm = LLMClient("https://ai.api.cloud.yandex.net/v1", api_key, DEFAULT_COMPLEX_MODEL, timeout=60, session=http)
-            telegram = TelegramBotClient(
-                telegram_env["TELEGRAM_BOT_TOKEN"], proxy=telegram_env.get("TELEGRAM_PROXY") or "http://10.110.112.1:2080"
+            llm = LLMClient(
+                config.api_base_url, api_key, config.complex_model_id, config.request_timeout_seconds, http,
             )
-            monitor = LogMonitor(llm, telegram, chats, "/var/lib/ai-agent/log-monitor-state.json")
+            telegram = TelegramBotClient(
+                telegram_env["TELEGRAM_BOT_TOKEN"], proxy=telegram_env.get("TELEGRAM_PROXY") or DEFAULT_TELEGRAM_PROXY,
+            )
+            monitor = LogMonitor(
+                llm, telegram, chats, str(Path(config.state_dir) / "log-monitor-state.json"),
+            )
             print(json.dumps(monitor.run(collect_logread(), current_state=runtime_state()), ensure_ascii=False))
         except Exception:
             # Без этого cron-запуск, упавший на исключении (сеть до LLM/Telegram,

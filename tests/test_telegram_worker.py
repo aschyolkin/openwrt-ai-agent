@@ -57,6 +57,44 @@ class TelegramWorkerTests(unittest.TestCase):
         self.assertIn("rollback:a1:yes", markup)
         self.assertIn("rollback:a1:no", markup)
 
+    def test_follow_up_after_confirmation_is_delivered_with_buttons(self):
+        client = FakeTelegramClient()
+        worker = TelegramWorker(
+            client,
+            lambda method, params: {
+                "ok": True, "state": "verified", "message": "Порт закрыт",
+                "follow_up": {
+                    "status": "awaiting_confirmation", "action_id": "a2",
+                    "message": "Открыть SSH из интернета на порту 9888/tcp",
+                },
+            },
+            frozenset({587849205}),
+        )
+        worker.handle_update({
+            "update_id": 5,
+            "callback_query": {"id": "cb", "data": "confirm:a1:yes", "message": {"chat": {"id": 587849205}}},
+        })
+        self.assertEqual(client.sent[0]["text"], "Готово. Порт закрыт.")
+        self.assertIn("9888", client.sent[1]["text"])
+        self.assertIn("confirm:a2:yes", str(client.sent[1]["reply_markup"]))
+
+    def test_follow_up_with_plain_text_is_delivered_without_buttons(self):
+        client = FakeTelegramClient()
+        worker = TelegramWorker(
+            client,
+            lambda method, params: {
+                "ok": True, "state": "verified", "message": "SSH открыт",
+                "follow_up": {"ok": True, "status": "completed", "message": "Оба шага выполнены"},
+            },
+            frozenset({587849205}),
+        )
+        worker.handle_update({
+            "update_id": 6,
+            "callback_query": {"id": "cb", "data": "confirm:a1:yes", "message": {"chat": {"id": 587849205}}},
+        })
+        self.assertEqual(client.sent[1]["text"], "Оба шага выполнены")
+        self.assertNotIn("reply_markup", client.sent[1])
+
     def test_verified_action_is_human_readable_and_hides_internal_json(self):
         response = {
             "ok": True, "action_id": "a1", "state": "verified",

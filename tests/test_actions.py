@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ai_agent.adapters import state_hashes
 from ai_agent.errors import AgentError
@@ -71,6 +74,21 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(result["message"], "Действие выполнено и проверено")
         self.assertEqual(self.target.read_text(encoding="utf-8"), "after\n")
 
+    def test_duplicate_confirmation_replays_without_applying_twice(self):
+        pending = self.manager.plan(self.session, "test_mutation", {"value": "after\n"})
+        action_id = pending["action_id"]
+
+        first = self.manager.confirm(self.session, action_id, True)
+        replay = self.manager.confirm(self.session, action_id, True)
+
+        self.assertEqual(replay["state"], first["state"])
+        self.assertTrue(replay["replayed"])
+        audit = [
+            json.loads(line) for line in (Path(self.temp.name) / "audit.log")
+            .read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(sum(item["event"] == "applying" for item in audit), 1)
+
     def test_stale_hash_cancels(self):
         pending = self.manager.plan(self.session, "test_mutation", {"value": "after\n"})
         self.target.write_text("foreign\n", encoding="utf-8")
@@ -99,9 +117,27 @@ class ActionTests(unittest.TestCase):
         result = self.manager.reverify(self.session, action_id)
 
         self.assertTrue(result["ok"])
+
         self.assertEqual(result["state"], "verified")
         self.assertEqual(self.target.read_text(encoding="utf-8"), "working\n")
         self.assertIsNone(self.sessions.active_action())
+    def test_rollback_retry_does_not_return_stale_apply_result(self):
+        self.context.verifier_ok = False
+        pending = self.manager.plan(self.session, "test_mutation", {"value": "broken\n"})
+        action_id = pending["action_id"]
+        failed = self.manager.confirm(self.session, action_id, True)
+        self.assertEqual(failed["state"], "rollback_pending")
+        # Simulate a crash after committing the decision but before persisting
+        # its response: result_json still contains the apply/verifier result.
+        self.assertTrue(self.sessions.transition(
+            action_id, "rollback_pending", "rollback_declined",
+        ))
+
+        replay = self.manager.confirm_rollback(self.session, action_id, False)
+
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["state"], "rollback_declined")
+
 
     def test_failed_reverify_remains_rollback_pending(self):
         self.context.verifier_ok = False
@@ -150,6 +186,32 @@ class ActionTests(unittest.TestCase):
 
         self.assertEqual(recovered, [])
         self.assertEqual(self.sessions.get_action(action_id)["state"], "rollback_pending")
+
+    def test_cleanup_preserves_nonterminal_and_damaged_backups(self):
+        now = 2_000_000_000
+        old = now - 60 * 86400
+        verified = self.backups.root / "old_verified"
+        pending = self.backups.root / "old_rollback_pending"
+        damaged = self.backups.root / "old_damaged"
+        for directory in (verified, pending, damaged):
+            directory.mkdir()
+        self.backups.write_meta(str(verified), {
+            "action_id": "verified", "state": "verified", "created_at": old,
+        })
+        self.backups.write_meta(str(pending), {
+            "action_id": "pending", "state": "rollback_pending", "created_at": old,
+        })
+        (damaged / "meta.json").write_text("not json", encoding="utf-8")
+        for directory in (verified, pending, damaged):
+            os.utime(directory, (old, old))
+
+        with patch("ai_agent.safety.backup.time.time", return_value=now):
+            removed = self.backups.cleanup(30)
+
+        self.assertEqual(removed, 1)
+        self.assertFalse(verified.exists())
+        self.assertTrue(pending.exists())
+        self.assertTrue(damaged.exists())
 
 
 if __name__ == "__main__":

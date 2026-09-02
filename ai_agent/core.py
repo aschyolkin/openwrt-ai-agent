@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +11,7 @@ import requests
 
 from .adapters import UBusAdapter, UCIAdapter, load_agent_config
 from .command import CommandRunner
-from .config import AgentConfig, ensure_private_directory, load_secret
+from .config import AgentConfig, ensure_private_directory, load_env_file, load_secret
 from .context import ToolContext
 from .errors import AgentError
 from .llm_client import LLMClient, Orchestrator
@@ -20,12 +22,19 @@ from .safety.actions import ActionManager
 from .safety.backup import BackupStore
 from .storage.metrics import MetricsStore
 from .storage.sessions import SessionStore
-from .telegram_state import read_telegram_health
+from .telegram_state import DEFAULT_TELEGRAM_HEALTH_PATH, read_telegram_health
 from .tools import register_all
 from .tools.backup import backup_restore
 
 
 LOG = logging.getLogger("ai-agent")
+
+# A confirmed action gives the model one more turn so a request that needs
+# several mutating steps ("close 2022 and open ssh on 9888") is not silently
+# truncated after the first one. Each step still needs its own confirmation, so
+# the chain cannot run away on its own; this cap only stops a model that keeps
+# proposing the same step forever.
+FOLLOW_UP_CHAIN_LIMIT = 8
 
 
 class AgentCore:
@@ -43,6 +52,8 @@ class AgentCore:
         self.backups = BackupStore(self.config.backups_dir, self.uci)
         self.metrics = MetricsStore(self.config.metrics_path)
         self.context = ToolContext(self.config, self.runner, self.uci, self.ubus, self.http, self.backups, self.metrics)
+        self._session_locks = tuple(threading.RLock() for _ in range(64))
+        self._state_lock = threading.RLock()
         self.registry = ToolRegistry()
         register_all(self.registry)
         self.registry.register(backup_restore)
@@ -97,43 +108,191 @@ class AgentCore:
 
     def chat(self, session_id: str | None, message: str) -> dict[str, Any]:
         session_id = self.sessions.ensure_session(session_id)
-        if self.orchestrator is None:
-            assert self.llm_error is not None
-            result = self.llm_error.to_dict()
-            result["session_id"] = session_id
+        with self._session_lock(session_id):
+            if self.orchestrator is None:
+                assert self.llm_error is not None
+                result = self.llm_error.to_dict()
+                result["session_id"] = session_id
+                return result
+            result = self.orchestrator.chat(session_id, message)
+            with self._runtime_state_lock():
+                if self.startup_warnings:
+                    result["warnings"] = list(self.startup_warnings)
+                    self.startup_warnings.clear()
             return result
-        result = self.orchestrator.chat(session_id, message)
-        if self.startup_warnings:
-            result["warnings"] = list(self.startup_warnings)
-            self.startup_warnings.clear()
-        return result
 
     def confirm(self, session_id: str, action_id: str, approve: bool) -> dict[str, Any]:
-        result = self.actions.confirm(session_id, action_id, approve)
-        self.sessions.append_message(
-            session_id,
-            {"role": "user", "content": f"[local confirmation: action={action_id}, approve={str(approve).lower()}]"},
+        with self._session_lock(session_id):
+            result = self.actions.confirm(session_id, action_id, approve)
+            replayed = bool(result.pop("replayed", False))
+            marker = f"[local confirmation: action={action_id}, approve={str(approve).lower()}]"
+            follow_up = self._continue_after_action(
+                session_id, action_id, marker, approve, result, replayed=replayed,
+            )
+            if follow_up is not None:
+                result["follow_up"] = follow_up
+            return result
+
+    def _continue_after_action(
+        self,
+        session_id: str,
+        action_id: str,
+        marker: str,
+        approve: bool,
+        result: dict[str, Any],
+        *,
+        replayed: bool = False,
+    ) -> dict[str, Any] | None:
+        """Let the model take one more turn after a successfully applied action.
+
+        Returns the follow-up chat response (which may itself be another
+        `awaiting_confirmation` plan) or None when the chain must stop: the user
+        declined, the action did not verify, or the chain hit its cap. In every
+        stop case the marker is still appended so the transcript stays complete.
+        """
+        applied = bool(approve and result.get("ok") and result.get("state") == "verified")
+        action = self.sessions.get_action(action_id)
+        if not applied or self.orchestrator is None:
+            if not replayed or not self._history_contains(session_id, marker):
+                self.sessions.append_message(session_id, {"role": "user", "content": marker})
+            return None
+        if action and action.get("follow_up_state") == "completed":
+            return action.get("follow_up")
+
+        marker_present = any(
+            item.get("role") == "user" and str(item.get("content") or "").startswith(marker)
+            for item in self.sessions.history(session_id, 500)
         )
-        return result
+        steps = self._follow_up_depth(session_id) + (0 if marker_present else 1)
+        if steps > FOLLOW_UP_CHAIN_LIMIT:
+            if not self._history_contains(session_id, marker):
+                self.sessions.append_message(session_id, {"role": "user", "content": marker})
+            LOG.warning("follow-up chain limit reached for session %s", session_id)
+            follow_up = {
+                "ok": True, "session_id": session_id, "status": "chain_limit",
+                "message": (
+                    f"Выполнено подряд {FOLLOW_UP_CHAIN_LIMIT} действий. Если что-то из запроса ещё "
+                    "не сделано, напиши это отдельным сообщением."
+                ),
+            }
+            if action:
+                self.sessions.complete_follow_up(action_id, follow_up)
+            return follow_up
+        detail = str(result.get("message") or "").strip()
+        prompt = (
+            f"{marker} Действие применено и проверено"
+            + (f": {detail}" if detail else "")
+            + ". Если в последнем запросе пользователя остались невыполненные части — вызови следующий "
+            "нужный tool сейчас. Если запрос выполнен полностью — коротко подтверди результат одним предложением."
+        )
+        previous_state = self.sessions.begin_follow_up(action_id) if action else ""
+        prompt_present = self._history_contains(session_id, prompt)
+        if previous_state == "running" and prompt_present:
+            recovered = self._recover_follow_up(session_id, action_id, prompt)
+            if recovered is not None:
+                if action:
+                    self.sessions.complete_follow_up(action_id, recovered)
+                return recovered
+        if not prompt_present:
+            self.sessions.append_message(session_id, {"role": "user", "content": prompt})
+        try:
+            follow_up = self.orchestrator.chat(session_id, prompt, persist_user=False)
+        except AgentError as exc:
+            LOG.warning("follow-up turn failed: %s", exc)
+            follow_up = None
+        if action:
+            self.sessions.complete_follow_up(action_id, follow_up)
+        return follow_up
+
+    def _recover_follow_up(
+        self, session_id: str, previous_action_id: str, prompt: str,
+    ) -> dict[str, Any] | None:
+        active = self.sessions.active_action()
+        if active and active["session_id"] == session_id and active["id"] != previous_action_id:
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "awaiting_confirmation",
+                "action_id": active["id"],
+                "expires_at": active["expires_at"],
+                "plan": {
+                    key: active["plan"].get(key)
+                    for key in ("summary", "diff", "targets", "services", "verifier")
+                },
+            }
+        messages = self.sessions.history(session_id, 500)
+        positions = [
+            index for index, item in enumerate(messages)
+            if item.get("role") == "user" and item.get("content") == prompt
+        ]
+        if not positions:
+            return None
+        for item in reversed(messages[positions[-1] + 1:]):
+            if item.get("role") == "assistant" and not item.get("tool_calls"):
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "completed",
+                    "message": item.get("content") or "",
+                }
+        return None
+
+    def _follow_up_depth(self, session_id: str) -> int:
+        count = 0
+        for item in reversed(self.sessions.history(session_id, 500)):
+            if item.get("role") != "user":
+                continue
+            if str(item.get("content") or "").startswith("[local confirmation:"):
+                count += 1
+                continue
+            break
+        return count
+
+    def _history_contains(self, session_id: str, content: str) -> bool:
+        return any(
+            item.get("role") == "user" and item.get("content") == content
+            for item in self.sessions.history(session_id, 500)
+        )
+
+    def _runtime_state_lock(self) -> threading.RLock:
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._state_lock = lock
+        return lock
+
+    def _session_lock(self, session_id: str) -> threading.RLock:
+        locks = getattr(self, "_session_locks", None)
+        if locks is None:
+            with self._runtime_state_lock():
+                locks = getattr(self, "_session_locks", None)
+                if locks is None:
+                    locks = tuple(threading.RLock() for _ in range(64))
+                    self._session_locks = locks
+        return locks[hash(session_id) % len(locks)]
 
     def rollback(self, session_id: str, action_id: str, approve: bool) -> dict[str, Any]:
-        result = self.actions.confirm_rollback(session_id, action_id, approve)
-        self.sessions.append_message(
-            session_id,
-            {"role": "user", "content": f"[local rollback confirmation: action={action_id}, approve={str(approve).lower()}]"},
-        )
-        return result
+        with self._session_lock(session_id):
+            result = self.actions.confirm_rollback(session_id, action_id, approve)
+            replayed = bool(result.pop("replayed", False))
+            marker = f"[local rollback confirmation: action={action_id}, approve={str(approve).lower()}]"
+            if not replayed or not self._history_contains(session_id, marker):
+                self.sessions.append_message(session_id, {"role": "user", "content": marker})
+            return result
 
     def reverify(self, session_id: str, action_id: str) -> dict[str, Any]:
-        result = self.actions.reverify(session_id, action_id)
-        self.sessions.append_message(
-            session_id,
-            {"role": "user", "content": f"[local re-verification: action={action_id}]"},
-        )
-        return result
+        with self._session_lock(session_id):
+            result = self.actions.reverify(session_id, action_id)
+            replayed = bool(result.pop("replayed", False))
+            marker = f"[local re-verification: action={action_id}]"
+            if not replayed or not self._history_contains(session_id, marker):
+                self.sessions.append_message(session_id, {"role": "user", "content": marker})
+            return result
 
     def history(self, session_id: str, limit: int = 100) -> dict[str, Any]:
-        return {"ok": True, "session_id": session_id, "messages": self.sessions.history(session_id, limit)}
+        with self._session_lock(session_id):
+            messages = self.sessions.history(session_id, limit)
+        return {"ok": True, "session_id": session_id, "messages": messages}
 
     def health(self) -> dict[str, Any]:
         active = self.sessions.active_action()
@@ -144,6 +303,8 @@ class AgentCore:
                 "state": active["state"], "created_at": active["created_at"],
                 "updated_at": active["updated_at"], "expires_at": active["expires_at"],
             }
+        with self._runtime_state_lock():
+            startup_warnings = list(self.startup_warnings)
         return {
             "ok": True,
             "status": "ready" if self.orchestrator is not None else "degraded",
@@ -157,9 +318,12 @@ class AgentCore:
             "socket": self.config.socket_path,
             "native_bindings": {"uci": self.uci.native, "ubus": self.ubus.native},
             "tools": len(list(self.registry)),
-            "telegram": read_telegram_health(),
+            "telegram": read_telegram_health(
+                load_env_file(os.environ.get("AI_AGENT_TELEGRAM_ENV", "/etc/ai-agent/telegram.env"))
+                .get("TELEGRAM_HEALTH_PATH", DEFAULT_TELEGRAM_HEALTH_PATH)
+            ),
             "active_action": active_summary,
-            "startup_warnings": list(self.startup_warnings),
+            "startup_warnings": startup_warnings,
         }
 
     def debug_uci(self, package: str) -> dict[str, Any]:

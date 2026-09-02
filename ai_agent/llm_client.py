@@ -149,12 +149,13 @@ class Orchestrator:
         self.max_context_chars = max_context_chars
         self.max_tool_context_chars = max_tool_context_chars
 
-    def chat(self, session_id: str, user_message: str) -> dict[str, Any]:
+    def chat(self, session_id: str, user_message: str, *, persist_user: bool = True) -> dict[str, Any]:
         if not isinstance(user_message, str) or not user_message.strip():
             raise AgentError("empty_message", "Сообщение не должно быть пустым")
         if len(user_message) > 8192:
             raise AgentError("message_too_large", "Сообщение превышает 8192 символа")
-        self.sessions.append_message(session_id, {"role": "user", "content": user_message.strip()})
+        if persist_user:
+            self.sessions.append_message(session_id, {"role": "user", "content": user_message.strip()})
         history = self.sessions.history_with_summary(session_id, self.max_context_chars)
         conversation = [{"role": "system", "content": self.system_prompt}] + history
         selected = self.model_router.select(user_message) if self.model_router is not None else None

@@ -136,8 +136,20 @@ class BackupStore:
         cutoff = time.time() - max(1, retention_days) * 86400
         removed = 0
         for directory in self.root.iterdir():
-            if directory.is_dir() and directory.stat().st_mtime < cutoff:
-                shutil.rmtree(directory)
-                removed += 1
+            if not directory.is_dir() or directory.stat().st_mtime >= cutoff:
+                continue
+            try:
+                state = str(self.read_meta(str(directory)).get("state") or "")
+            except AgentError:
+                # A damaged backup may be the only recovery material left; it
+                # must be inspected manually instead of silently deleted.
+                continue
+            if state not in {
+                "verified", "rolled_back", "rollback_declined",
+                "cancelled", "expired", "stale",
+            }:
+                continue
+            shutil.rmtree(directory)
+            removed += 1
         return removed
 
