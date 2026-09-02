@@ -53,7 +53,10 @@ class SessionStore:
                     updated_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL,
                     backup_dir TEXT,
-                    error_json TEXT
+                    error_json TEXT,
+                    result_json TEXT,
+                    follow_up_state TEXT,
+                    follow_up_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS actions_state ON actions(state, updated_at);
                 CREATE TABLE IF NOT EXISTS llm_usage (
@@ -75,6 +78,16 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS llm_usage_session ON llm_usage(session_id, id);
                 """
             )
+            columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(actions)").fetchall()
+            }
+            for name, declaration in (
+                ("result_json", "TEXT"),
+                ("follow_up_state", "TEXT"),
+                ("follow_up_json", "TEXT"),
+            ):
+                if name not in columns:
+                    self.connection.execute(f"ALTER TABLE actions ADD COLUMN {name} {declaration}")
 
     def record_llm_usage(self, session_id: str, usage: dict[str, Any]) -> None:
         now = int(time.time())
@@ -239,7 +252,50 @@ class SessionStore:
         result["plan"] = json.loads(result.pop("plan_json"))
         result["error"] = json.loads(result["error_json"]) if result.get("error_json") else None
         result.pop("error_json", None)
+        result["result"] = json.loads(result["result_json"]) if result.get("result_json") else None
+        result.pop("result_json", None)
+        result["follow_up"] = json.loads(result["follow_up_json"]) if result.get("follow_up_json") else None
+        result.pop("follow_up_json", None)
         return result
+
+    def store_action_result(self, action_id: str, result: dict[str, Any]) -> None:
+        """Persist the externally visible confirm result for idempotent retries."""
+        now = int(time.time())
+        with self._lock, self.connection:
+            self.connection.execute(
+                "UPDATE actions SET result_json=?, updated_at=? WHERE id=?",
+                (json.dumps(result, ensure_ascii=False, separators=(",", ":")), now, action_id),
+            )
+
+    def begin_follow_up(self, action_id: str) -> str:
+        """Mark a continuation as running, preserving completed work on retries."""
+        now = int(time.time())
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT follow_up_state FROM actions WHERE id=?", (action_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(action_id)
+            state = str(row["follow_up_state"] or "")
+            if state == "completed":
+                return state
+            self.connection.execute(
+                "UPDATE actions SET follow_up_state='running', updated_at=? WHERE id=?",
+                (now, action_id),
+            )
+            return state
+
+    def complete_follow_up(self, action_id: str, result: dict[str, Any] | None) -> None:
+        now = int(time.time())
+        encoded = (
+            json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(result, dict) else None
+        )
+        with self._lock, self.connection:
+            self.connection.execute(
+                "UPDATE actions SET follow_up_state='completed', follow_up_json=?, updated_at=? WHERE id=?",
+                (encoded, now, action_id),
+            )
 
     def active_action(self) -> dict[str, Any] | None:
         placeholders = ",".join("?" for _ in ACTIVE_STATES)

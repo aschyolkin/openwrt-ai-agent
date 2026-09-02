@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,37 @@ class SessionContextTests(unittest.TestCase):
             self.assertIn("Запрос пользователя", result[0]["content"])
             self.assertEqual(result[-1]["role"], "assistant")
             self.assertLessEqual(len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))), 5000)
+
+
+    def test_existing_database_is_migrated_for_durable_action_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = str(Path(temporary) / "sessions.sqlite")
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """CREATE TABLE actions (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    backup_dir TEXT,
+                    error_json TEXT
+                )"""
+            )
+            connection.commit()
+            connection.close()
+
+            store = SessionStore(path)
+            columns = {
+                row["name"]
+                for row in store.connection.execute("PRAGMA table_info(actions)").fetchall()
+            }
+
+            self.assertTrue({"result_json", "follow_up_state", "follow_up_json"} <= columns)
 
 
 if __name__ == "__main__":

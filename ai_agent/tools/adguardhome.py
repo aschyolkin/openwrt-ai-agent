@@ -9,10 +9,7 @@ from ..adapters import state_hashes
 from ..errors import AgentError
 from ..models import MutationPlan, VerificationResult
 from ..registry import ExecClass, tool
-from .common import DOMAIN_PATTERN, dns_query, nft_ruleset_text, normalize_domain, service_action, service_status
-
-
-EMPTY_OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+from .common import DOMAIN_PATTERN, EMPTY_OBJECT, dns_query, nft_ruleset_text, normalize_domain, service_action, service_status
 
 
 def _agh_blocked_verdict(adguard: dict[str, Any], singbox: dict[str, Any]) -> tuple[bool, bool]:

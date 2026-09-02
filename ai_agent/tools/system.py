@@ -11,9 +11,7 @@ from ..command import first_executable
 from ..metrics import cpu_temperatures, cpu_usage_percent, sample_current_metrics
 from ..redaction import redact_log_network_data
 from ..registry import tool
-
-
-EMPTY_OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+from .common import EMPTY_OBJECT
 
 METRIC_DIRECTION = {
     "cpu_percent": "high_bad",

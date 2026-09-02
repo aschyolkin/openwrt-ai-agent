@@ -11,14 +11,12 @@ from .errors import AgentError
 
 DEFAULT_SIMPLE_MODEL = "gpt://b1gq9kr4q4sjlm3vradj/gpt-oss-20b/latest"
 DEFAULT_COMPLEX_MODEL = "gpt://b1gq9kr4q4sjlm3vradj/deepseek-v4-flash/latest"
-DEFAULT_MODEL = DEFAULT_COMPLEX_MODEL
 
 
 @dataclass(frozen=True)
 class AgentConfig:
     enabled: bool = True
     socket_path: str = "/var/run/ai-agent.sock"
-    model_id: str = DEFAULT_MODEL
     simple_model_id: str = DEFAULT_SIMPLE_MODEL
     complex_model_id: str = DEFAULT_COMPLEX_MODEL
     model_routing_enabled: bool = True
@@ -64,9 +62,8 @@ class AgentConfig:
         return cls(
             enabled=str(values.get("enable", values.get("enabled", "1"))).lower() not in {"0", "false", "no"},
             socket_path=str(values.get("socket_path", cls.socket_path)),
-            model_id=str(values.get("model_id", DEFAULT_MODEL)),
             simple_model_id=str(values.get("simple_model_id", DEFAULT_SIMPLE_MODEL)),
-            complex_model_id=str(values.get("complex_model_id", values.get("model_id", DEFAULT_COMPLEX_MODEL))),
+            complex_model_id=str(values.get("complex_model_id") or values.get("model_id") or DEFAULT_COMPLEX_MODEL),
             model_routing_enabled=str(values.get("model_routing_enabled", "1")).lower() not in {"0", "false", "no"},
             api_base_url=str(values.get("api_base_url", cls.api_base_url)).rstrip("/"),
             max_tool_loop_iterations=integer("max_tool_loop_iterations", 8, 1, 20),
@@ -108,3 +105,18 @@ def load_secret(path: str, key: str = "YANDEX_AI_STUDIO_API_KEY") -> str:
 def ensure_private_directory(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
+
+
+def load_env_file(path: str | Path) -> dict[str, str]:
+    """Read a simple KEY=VALUE service file without shell evaluation."""
+    values: dict[str, str] = {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values

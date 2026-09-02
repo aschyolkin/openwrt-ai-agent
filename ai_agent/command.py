@@ -32,7 +32,7 @@ DEFAULT_ALLOWED_EXECUTABLES = frozenset(
         "/sbin/lsmod", "/usr/bin/lsmod", "/usr/bin/apk",
         "/usr/bin/nft", "/usr/bin/netshift", "/etc/init.d/netshift",
         "/etc/init.d/sing-box", "/etc/init.d/adguardhome", "/etc/init.d/zapret",
-        "/etc/init.d/firewall",
+        "/etc/init.d/firewall", "/etc/init.d/dropbear",
         "/opt/zapret/dwc.sh",
     }
 )

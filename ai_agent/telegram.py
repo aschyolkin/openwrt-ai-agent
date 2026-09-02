@@ -6,6 +6,9 @@ from typing import Any, Protocol
 import requests
 
 
+
+DEFAULT_TELEGRAM_PROXY = "http://10.110.112.1:2080"
+
 class TelegramError(RuntimeError):
     """Safe Bot API error; never include the bot token in its message."""
 

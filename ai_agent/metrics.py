@@ -77,16 +77,26 @@ def mem_available_percent() -> float | None:
 
 def conntrack_count() -> int | None:
     try:
+        raw_count = Path("/proc/sys/net/netfilter/nf_conntrack_count").read_text(
+            encoding="ascii",
+        ).strip()
+        return int(raw_count)
+    except (OSError, ValueError):
+        pass
+    try:
         executable = first_executable(("/usr/sbin/conntrack", "/sbin/conntrack", "/usr/bin/conntrack"))
     except AgentError:
         return None
     try:
-        result = subprocess.run([executable, "-L"], capture_output=True, text=True, timeout=10, check=False)
+        result = subprocess.run([executable, "-C"], capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    return sum(1 for line in result.stdout.splitlines() if line.strip())
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
 
 
 def lan_client_count() -> int | None:

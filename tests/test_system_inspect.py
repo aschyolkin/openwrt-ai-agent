@@ -240,6 +240,37 @@ class PromptRegressionTests(unittest.TestCase):
         self.assertIn("sync_log_monitor_cron", init_script)
         self.assertIn("reload_service", init_script)
 
+    def test_installer_replaces_code_tree_and_preserves_only_custom_prompt(self):
+        root = Path(__file__).resolve().parents[1]
+        installer = (root / "install.sh").read_text(encoding="utf-8")
+
+        self.assertIn("mktemp -d /usr/lib/ai-agent.new.XXXXXX", installer)
+        self.assertIn('mv "$CODE_STAGE" /usr/lib/ai-agent', installer)
+        self.assertNotIn('cp -R "$SCRIPT_DIR/ai_agent" /usr/lib/ai-agent/', installer)
+        self.assertIn(".system_prompt.default.md", installer)
+        self.assertIn('cmp -s "$PROMPT_TARGET" "$PROMPT_BASELINE"', installer)
+
+    def test_uninstaller_removes_every_installed_runtime_component(self):
+        root = Path(__file__).resolve().parents[1]
+        uninstaller = (root / "uninstall.sh").read_text(encoding="utf-8")
+
+        for path in (
+            "/usr/bin/ai-agent-log-monitor",
+            "/usr/bin/ai-agent-metrics-sample",
+            "/usr/bin/ai-agent-telegram",
+            "/etc/init.d/ai-agent-telegram",
+            "/www/luci-static/resources/view/ai-agent/overview.js",
+            "/usr/share/luci/menu.d/luci-app-ai-agent.json",
+            "/usr/share/rpcd/acl.d/luci-app-ai-agent.json",
+            "/usr/libexec/ai-agent-luci",
+        ):
+            self.assertIn(path, uninstaller)
+        for marker in (
+            "ai-agent-maintenance", "ai-agent-log-monitor", "ai-agent-metrics-sample",
+        ):
+            self.assertIn(f"# {marker}$", uninstaller)
+
+
     def test_cron_invoked_bin_scripts_set_pythonpath(self):
         # Скрипты, запускаемые напрямую через `python3 -m ai_agent.<module>` из
         # cron (не через ai-agent-cli и не через procd, который сам передаёт env),

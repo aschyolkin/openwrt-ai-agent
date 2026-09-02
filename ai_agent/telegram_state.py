@@ -79,19 +79,29 @@ class TelegramOffsetStore:
                     "key": key,
                     "response": response,
                 }
-                delivery = pending.get("delivery")
-                if isinstance(delivery, dict):
+                deliveries: dict[str, int] = {}
+                raw_deliveries = pending.get("deliveries")
+                if isinstance(raw_deliveries, dict):
+                    for delivery_key, raw_count in raw_deliveries.items():
+                        try:
+                            key_value = str(delivery_key)
+                            sent_chunks = int(raw_count)
+                            if key_value and sent_chunks >= 0:
+                                deliveries[key_value] = sent_chunks
+                        except (TypeError, ValueError):
+                            continue
+                # Read the one-checkpoint format written by older releases.
+                legacy = pending.get("delivery")
+                if isinstance(legacy, dict):
                     try:
-                        delivery_key = str(delivery["key"])
-                        sent_chunks = int(delivery["sent_chunks"])
-                        if not delivery_key or sent_chunks < 0:
-                            raise ValueError
-                        normalized["delivery"] = {
-                            "key": delivery_key,
-                            "sent_chunks": sent_chunks,
-                        }
+                        legacy_key = str(legacy["key"])
+                        legacy_count = int(legacy["sent_chunks"])
+                        if legacy_key and legacy_count >= 0:
+                            deliveries.setdefault(legacy_key, legacy_count)
                     except (KeyError, TypeError, ValueError):
                         pass
+                if deliveries:
+                    normalized["deliveries"] = deliveries
                 pending = normalized
             except (KeyError, TypeError, ValueError):
                 pending = None
@@ -108,17 +118,18 @@ class TelegramOffsetStore:
         update_id: int,
         key: str,
         response: dict[str, Any],
-        delivery: dict[str, Any] | None = None,
+        deliveries: dict[str, int] | None = None,
     ) -> None:
         pending: dict[str, Any] = {
             "update_id": int(update_id),
             "key": str(key),
             "response": response,
         }
-        if isinstance(delivery, dict):
-            pending["delivery"] = {
-                "key": str(delivery["key"]),
-                "sent_chunks": max(0, int(delivery["sent_chunks"])),
+        if isinstance(deliveries, dict):
+            pending["deliveries"] = {
+                str(key): max(0, int(sent_chunks))
+                for key, sent_chunks in deliveries.items()
+                if str(key)
             }
         payload: dict[str, Any] = {
             "offset": offset,

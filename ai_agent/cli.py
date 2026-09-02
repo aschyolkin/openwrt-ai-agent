@@ -48,15 +48,28 @@ def print_response(response: dict[str, Any], as_json: bool = False) -> None:
 
 
 def maybe_confirm(socket_path: str, session_id: str, response: dict[str, Any], as_json: bool) -> dict[str, Any]:
-    if response.get("status") != "awaiting_confirmation" or not sys.stdin.isatty():
-        return response
-    approved = input("Применить изменение? [y/N] ").strip().lower() in {"y", "yes", "д", "да"}
-    result = request(socket_path, "confirm", {"session_id": session_id, "action_id": response["action_id"], "approve": approved})
-    print_response(result, as_json)
-    if result.get("state") == "rollback_pending":
-        rollback = input("Verifier не пройден. Выполнить откат? [y/N] ").strip().lower() in {"y", "yes", "д", "да"}
-        result = request(socket_path, "rollback", {"session_id": session_id, "action_id": response["action_id"], "approve": rollback})
+    """Confirm a planned action, then keep walking any follow-up steps.
+
+    A request needing several changes comes back one plan at a time: Core
+    returns the next step as `follow_up` after each applied action, so the loop
+    below asks for each confirmation in turn instead of stopping at the first.
+    """
+    result = response
+    while result.get("status") == "awaiting_confirmation" and sys.stdin.isatty():
+        action_id = result["action_id"]
+        approved = input("Применить изменение? [y/N] ").strip().lower() in {"y", "yes", "д", "да"}
+        result = request(socket_path, "confirm", {"session_id": session_id, "action_id": action_id, "approve": approved})
         print_response(result, as_json)
+        if result.get("state") == "rollback_pending":
+            rollback = input("Verifier не пройден. Выполнить откат? [y/N] ").strip().lower() in {"y", "yes", "д", "да"}
+            result = request(socket_path, "rollback", {"session_id": session_id, "action_id": action_id, "approve": rollback})
+            print_response(result, as_json)
+            break
+        follow_up = result.get("follow_up")
+        if not isinstance(follow_up, dict):
+            break
+        print_response(follow_up, as_json)
+        result = follow_up
     return result
 
 

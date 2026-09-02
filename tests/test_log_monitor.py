@@ -1,10 +1,11 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
 
-from ai_agent.log_monitor import LogMonitor, recent_or_new_lines, suspicious_lines
+from ai_agent.log_monitor import LogMonitor, prepare_candidates, recent_or_new_lines, suspicious_lines
 from ai_agent.telegram import FakeTelegramClient
 
 
@@ -111,7 +112,7 @@ class LogMonitorTests(unittest.TestCase):
             self.assertFalse(result["alerted"])
             llm.chat.assert_not_called()
 
-    def test_malformed_dns_burst_is_aggregated_short_and_skips_llm(self):
+    def test_malformed_dns_burst_never_alerts_and_skips_llm(self):
         with tempfile.TemporaryDirectory() as temporary:
             llm = Mock()
             telegram = FakeTelegramClient()
@@ -119,38 +120,64 @@ class LogMonitorTests(unittest.TestCase):
             lines = [
                 "Fri Aug 28 11:00:00 user.notice AdGuardHome: [error] dnsproxy: "
                 'unpacking udp packet err="bad question name: dns: bad rdata"'
-                for _ in range(120)
+                for _ in range(620)
             ]
             result = monitor.run(lines, NOW, current_state={"adguardhome": "running"})
-            self.assertEqual(result["malformed_dns"], 120)
-            self.assertEqual(result["candidates"], 1)
-            self.assertTrue(result["alerted"])
+            self.assertEqual(result["malformed_dns"], 620)
+            self.assertEqual(result["candidates"], 0)
+            self.assertFalse(result["alerted"])
+            self.assertEqual(telegram.sent, [])
             llm.chat.assert_not_called()
-            alert = telegram.sent[0]["text"]
-            self.assertLessEqual(len(alert), 900)
-            self.assertIn("не критический сбой", alert)
-            self.assertNotIn("Что проверить:", alert)
+            self.assertEqual(result["malformed_dns_types"]["bad_rdata"], 620)
 
-    def test_malformed_dns_warning_has_24_hour_category_cooldown(self):
+    def test_malformed_dns_matches_every_unpack_wording(self):
         with tempfile.TemporaryDirectory() as temporary:
             llm = Mock()
             telegram = FakeTelegramClient()
-            state_path = str(Path(temporary) / "state.json")
-            monitor = LogMonitor(llm, telegram, [587849205], state_path)
-            first = [
-                "Fri Aug 28 11:00:00 user.notice AdGuardHome: [error] dnsproxy: "
-                'unpacking udp packet err="bad question name: dns: bad rdata"'
-                for _ in range(100)
+            monitor = LogMonitor(llm, telegram, [587849205], str(Path(temporary) / "state.json"))
+            lines = [
+                'Fri Aug 28 11:00:00 user.notice AdGuardHome[1]: [error] dnsproxy: unpacking udp packet err="dns: bad rdata"',
+                'Fri Aug 28 11:00:01 user.notice AdGuardHome[1]: [error] dnsproxy: unpacking udp packet err="dns: buffer size too small"',
+                'Fri Aug 28 11:00:02 user.notice AdGuardHome: [error] dnsproxy: unpacking udp packet err="bad question name: dns: bad rdata"',
+                'Fri Aug 28 11:00:03 user.notice AdGuardHome: [error] dnsproxy: reading msg proto=tcp err="unexpected EOF"',
+                'Fri Aug 28 11:00:04 user.notice AdGuardHome[1]: [error] dnsproxy: handling tcp; unpacking msg err="bad question name: dns: buffer size too small"',
             ]
-            second = [
-                "Fri Aug 28 17:00:00 user.notice AdGuardHome: [error] dnsproxy: "
-                'unpacking udp packet err="bad question name: dns: buffer size too small"'
-                for _ in range(110)
-            ]
-            self.assertTrue(monitor.run(first, NOW, {"adguardhome": "running"})["alerted"])
-            later = datetime(2026, 8, 28, 18, 0, 0)
-            self.assertFalse(monitor.run(second, later, {"adguardhome": "running"})["alerted"])
-            self.assertEqual(len(telegram.sent), 1)
+            result = monitor.run(lines, NOW, current_state={"adguardhome": "running"})
+            self.assertEqual(result["malformed_dns"], 5)
+            self.assertEqual(result["candidates"], 0)
+            self.assertFalse(result["alerted"])
+            llm.chat.assert_not_called()
+
+    def test_real_problem_next_to_malformed_dns_still_alerts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            llm = Mock()
+            llm.chat.return_value = {"content": json.dumps({
+                "severity": "critical", "title": "sing-box упал",
+                "summary": "Процесс sing-box остановлен.",
+                "evidence": ["sing-box: panic"], "recommended_actions": ["Перезапустить sing-box"],
+            })}
+            telegram = FakeTelegramClient()
+            monitor = LogMonitor(llm, telegram, [587849205], str(Path(temporary) / "state.json"))
+            lines = [
+                'Fri Aug 28 11:00:00 user.notice AdGuardHome[1]: [error] dnsproxy: unpacking udp packet err="dns: bad rdata"'
+                for _ in range(300)
+            ] + ["Fri Aug 28 11:05:00 daemon.err sing-box[123]: panic: runtime error"]
+            result = monitor.run(lines, NOW, current_state={"adguardhome": "running"})
+            self.assertEqual(result["malformed_dns"], 300)
+            self.assertEqual(result["candidates"], 1)
+            self.assertTrue(result["alerted"])
+            self.assertNotIn("DNS", telegram.sent[0]["text"])
+
+    def test_agent_own_info_lines_are_not_analysed_but_warnings_are(self):
+        lines = [
+            "Fri Aug 28 11:00:00 daemon.err python3[3049]: ai-agent[3049]: INFO ai-agent.llm: "
+            "llm_usage model=gpt://x route=complex prompt_tokens=8464 tool_calls=1",
+            "Fri Aug 28 11:00:01 daemon.err python3[3049]: ai-agent[3049]: WARNING ai-agent.core: "
+            "follow-up turn failed: llm_unavailable",
+        ]
+        candidates, _meta = prepare_candidates(lines, NOW)
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("WARNING", candidates[0])
 
     def test_alert_formatter_enforces_small_hard_limit(self):
         alert = LogMonitor._format_alert({

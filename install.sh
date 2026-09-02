@@ -45,13 +45,49 @@ for pkg in python3 python3-sqlite3 python3-yaml python3-requests python3-ubus py
 done
 
 echo "==> installing ai-agent code"
-mkdir -p /usr/lib/ai-agent /etc/ai-agent /var/lib/ai-agent/backups
+mkdir -p /etc/ai-agent /var/lib/ai-agent/backups
 chmod 700 /etc/ai-agent /var/lib/ai-agent /var/lib/ai-agent/backups
-cp -R "$SCRIPT_DIR/ai_agent" /usr/lib/ai-agent/
-find /usr/lib/ai-agent/ai_agent -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-find /usr/lib/ai-agent/ai_agent -type d -name __pycache__ -exec rm -rf {} +
-find /usr/lib/ai-agent/ai_agent -type d -exec chmod 755 {} \;
-find /usr/lib/ai-agent/ai_agent -type f -exec chmod 644 {} \;
+
+PROMPT_TARGET=/etc/ai-agent/system_prompt.md
+PROMPT_BASELINE=/etc/ai-agent/.system_prompt.default.md
+PROMPT_MANAGED=0
+if [ ! -e "$PROMPT_TARGET" ]; then
+	PROMPT_MANAGED=1
+elif [ -f "$PROMPT_BASELINE" ] && cmp -s "$PROMPT_TARGET" "$PROMPT_BASELINE"; then
+	PROMPT_MANAGED=1
+elif [ -f /usr/lib/ai-agent/ai_agent/prompts/system_prompt.md ] \
+	&& cmp -s "$PROMPT_TARGET" /usr/lib/ai-agent/ai_agent/prompts/system_prompt.md; then
+	# Upgrade from a release that did not yet keep a managed baseline.
+	PROMPT_MANAGED=1
+fi
+
+CODE_STAGE="$(mktemp -d /usr/lib/ai-agent.new.XXXXXX)"
+CODE_OLD=""
+cleanup_code_stage() {
+	[ -z "$CODE_STAGE" ] || rm -rf "$CODE_STAGE"
+	if [ -n "$CODE_OLD" ]; then
+		if [ ! -d /usr/lib/ai-agent ]; then
+			mv "$CODE_OLD" /usr/lib/ai-agent
+		else
+			rm -rf "$CODE_OLD"
+		fi
+	fi
+}
+trap cleanup_code_stage EXIT
+cp -R "$SCRIPT_DIR/ai_agent" "$CODE_STAGE/ai_agent"
+chmod 755 "$CODE_STAGE"
+find "$CODE_STAGE/ai_agent" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+find "$CODE_STAGE/ai_agent" -type d -name __pycache__ -exec rm -rf {} +
+find "$CODE_STAGE/ai_agent" -type d -exec chmod 755 {} \;
+find "$CODE_STAGE/ai_agent" -type f -exec chmod 644 {} \;
+if [ -d /usr/lib/ai-agent ]; then
+	CODE_OLD="/usr/lib/ai-agent.old.$$"
+	mv /usr/lib/ai-agent "$CODE_OLD"
+fi
+mv "$CODE_STAGE" /usr/lib/ai-agent
+CODE_STAGE=""
+[ -z "$CODE_OLD" ] || rm -rf "$CODE_OLD"
+CODE_OLD=""
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent" /usr/bin/ai-agent
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-cli" /usr/bin/ai-agent-cli
 install_file 0755 "$SCRIPT_DIR/bin/ai-agent-maintenance" /usr/bin/ai-agent-maintenance
@@ -91,10 +127,11 @@ if [ ! -e /etc/config/ai-agent ]; then
 else
 	echo "    preserving existing /etc/config/ai-agent"
 fi
-if [ ! -e /etc/ai-agent/system_prompt.md ]; then
-	install_file 0600 "$SCRIPT_DIR/etc/ai-agent/system_prompt.md" /etc/ai-agent/system_prompt.md
+if [ "$PROMPT_MANAGED" -eq 1 ]; then
+	install_file 0600 "$SCRIPT_DIR/etc/ai-agent/system_prompt.md" "$PROMPT_TARGET"
+	install_file 0600 "$SCRIPT_DIR/etc/ai-agent/system_prompt.md" "$PROMPT_BASELINE"
 else
-	echo "    preserving existing /etc/ai-agent/system_prompt.md"
+	echo "    preserving customized $PROMPT_TARGET"
 fi
 
 if [ -n "$SECRET_FILE" ]; then
@@ -129,8 +166,12 @@ echo '*/10 * * * * /usr/bin/ai-agent-metrics-sample # ai-agent-metrics-sample' >
 /etc/init.d/cron restart >/dev/null 2>&1 || true
 
 /etc/init.d/ai-agent enable
+/etc/init.d/ai-agent-telegram enable
 if [ "$START_SERVICE" -eq 1 ]; then
 	/etc/init.d/ai-agent restart
+	if [ -r /etc/ai-agent/telegram.env ]; then
+		/etc/init.d/ai-agent-telegram restart
+	fi
 fi
 
 echo "==> ai-agent installed"

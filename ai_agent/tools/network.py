@@ -6,10 +6,7 @@ from typing import Any
 
 from ..command import first_executable
 from ..registry import ExecClass, tool
-from .common import DOMAIN_PATTERN, dns_query, normalize_domain
-
-
-EMPTY_OBJECT = {"type": "object", "properties": {}, "additionalProperties": False}
+from .common import DOMAIN_PATTERN, EMPTY_OBJECT, dns_query, normalize_domain
 
 
 @tool(

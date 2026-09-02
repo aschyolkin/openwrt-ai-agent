@@ -69,6 +69,7 @@ class TelegramWorker:
         self.offset: int | None = state["offset"]
         self._pending_core: dict[str, Any] | None = state["pending"]
         self._active_update_id: int | None = None
+        self._delivery_sequence = 0
 
     @staticmethod
     def _core_cache_key(method: str, params: dict[str, Any]) -> str:
@@ -83,6 +84,7 @@ class TelegramWorker:
         chat_id: int,
         parts: list[str],
         kwargs: dict[str, Any],
+        sequence: int = 0,
     ) -> str:
         encoded = json.dumps(
             {
@@ -90,6 +92,7 @@ class TelegramWorker:
                 "parse_mode": "HTML",
                 "parts": parts,
                 "kwargs": kwargs,
+                "sequence": sequence,
             },
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
@@ -104,7 +107,7 @@ class TelegramWorker:
             int(pending["update_id"]),
             str(pending["key"]),
             pending["response"],
-            pending.get("delivery"),
+            pending.get("deliveries"),
         )
 
     def _call_core(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -133,21 +136,22 @@ class TelegramWorker:
 
     def _send(self, chat_id: int, text: str, **kwargs: Any) -> None:
         parts = markdown_to_telegram_chunks(text)
-        delivery_key = self._delivery_cache_key(chat_id, parts, kwargs)
+        sequence = self._delivery_sequence
+        self._delivery_sequence += 1
+        delivery_key = self._delivery_cache_key(chat_id, parts, kwargs, sequence)
         start = 0
         pending = self._pending_core
         if self._active_update_id is not None and isinstance(pending, dict):
-            delivery = pending.get("delivery")
-            if isinstance(delivery, dict) and delivery.get("key") == delivery_key:
-                try:
-                    start = max(0, min(int(delivery.get("sent_chunks", 0)), len(parts)))
-                except (TypeError, ValueError):
-                    start = 0
-            else:
-                pending["delivery"] = {
-                    "key": delivery_key,
-                    "sent_chunks": 0,
-                }
+            deliveries = pending.setdefault("deliveries", {})
+            if not isinstance(deliveries, dict):
+                deliveries = {}
+                pending["deliveries"] = deliveries
+            try:
+                start = max(0, min(int(deliveries.get(delivery_key, 0)), len(parts)))
+            except (TypeError, ValueError):
+                start = 0
+            if delivery_key not in deliveries:
+                deliveries[delivery_key] = 0
                 self._persist_pending()
 
         for index, part in enumerate(parts):
@@ -165,10 +169,7 @@ class TelegramWorker:
                 plain = html.unescape(re.sub(r"<[^>]+>", "", part))
                 self.client.send_message(chat_id, plain, **kwargs)
             if self._active_update_id is not None and isinstance(pending, dict):
-                pending["delivery"] = {
-                    "key": delivery_key,
-                    "sent_chunks": index + 1,
-                }
+                pending["deliveries"][delivery_key] = index + 1
                 self._persist_pending()
 
     def _request_with_typing(self, chat_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -207,6 +208,16 @@ class TelegramWorker:
             ],
         ]}
 
+    def _deliver(self, chat_id: int, response: dict[str, Any]) -> None:
+        """Send a Core chat response: a confirmation prompt with buttons, or text."""
+        if response.get("status") == "awaiting_confirmation" and response.get("action_id"):
+            plan = response.get("plan", {})
+            summary = response.get("message") or plan.get("summary") or "Выполнить запрошенное действие"
+            body = "Подтвердите действие:\n" + _sentence(str(summary))
+            self._send(chat_id, body, reply_markup=self._buttons(str(response["action_id"])))
+            return
+        self._send(chat_id, human_response(response))
+
     def handle_update(self, update: dict[str, Any]) -> str:
         accepted, reason, chat_id = self.guard.accept(update)
         if not accepted:
@@ -217,13 +228,7 @@ class TelegramWorker:
             if not isinstance(text, str):
                 return "ignored"
             response = self._request_with_typing(chat_id, "chat", {"session_id": self.guard.session_id(chat_id), "message": text})
-            if response.get("status") == "awaiting_confirmation" and response.get("action_id"):
-                plan = response.get("plan", {})
-                summary = response.get("message") or plan.get("summary") or "Выполнить запрошенное действие"
-                body = "Подтвердите действие:\n" + _sentence(str(summary))
-                self._send(chat_id, body, reply_markup=self._buttons(str(response["action_id"])))
-            else:
-                self._send(chat_id, human_response(response))
+            self._deliver(chat_id, response)
             return "message"
         callback = update.get("callback_query")
         if isinstance(callback, dict):
@@ -252,6 +257,12 @@ class TelegramWorker:
             if response.get("state") == "rollback_pending" and response.get("action_id"):
                 kwargs["reply_markup"] = self._recovery_buttons(str(response["action_id"]))
             self._send(chat_id, human_response(response), **kwargs)
+            # A confirmed action may leave part of the user's request undone;
+            # Core takes one more turn and returns it here, so the next step of
+            # a multi-step request reaches the chat instead of being dropped.
+            follow_up = response.get("follow_up")
+            if isinstance(follow_up, dict):
+                self._deliver(chat_id, follow_up)
             return "callback"
         return "ignored"
 
@@ -263,6 +274,7 @@ class TelegramWorker:
                 if self.offset is not None and update_id < self.offset:
                     continue
                 self._active_update_id = update_id
+                self._delivery_sequence = 0
                 self.handle_update(update)
                 next_offset = update_id + 1
                 if self.offset_store is not None:

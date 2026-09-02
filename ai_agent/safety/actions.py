@@ -87,6 +87,19 @@ class ActionManager:
         with self._process_lock:
             action = self._owned_action(session_id, action_id)
             if action["state"] != "pending":
+                replay = action.get("result")
+                matching_decision = (
+                    (approve and action["state"] != "cancelled")
+                    or (not approve and action["state"] == "cancelled")
+                )
+                if matching_decision and (
+                    not isinstance(replay, dict)
+                    or str(replay.get("state", "")) != str(action["state"])
+                ):
+                    replay = self._result_for_existing_action(action)
+                    self.sessions.store_action_result(action_id, replay)
+                if matching_decision and isinstance(replay, dict):
+                    return {**replay, "replayed": True}
                 raise AgentError("invalid_action_state", f"Действие находится в состоянии {action['state']}")
             if int(action["expires_at"]) < int(time.time()):
                 self.sessions.transition(action_id, "pending", "expired")
@@ -95,21 +108,42 @@ class ActionManager:
             if not approve:
                 self.sessions.transition(action_id, "pending", "cancelled")
                 self._audit("cancelled", action_id, {"session_id": session_id})
-                return {"ok": True, "action_id": action_id, "state": "cancelled", "message": "Действие отменено"}
+                result = {"ok": True, "action_id": action_id, "state": "cancelled", "message": "Действие отменено"}
+                self.sessions.store_action_result(action_id, result)
+                return result
             if not self.sessions.transition(action_id, "pending", "confirmed"):
                 raise AgentError("action_race", "Состояние действия изменилось параллельно")
-            return self._apply(action_id)
+            result = self._apply(action_id)
+            self.sessions.store_action_result(action_id, result)
+            return result
 
     def confirm_rollback(self, session_id: str, action_id: str, approve: bool) -> dict[str, Any]:
         with self._process_lock:
             action = self._owned_action(session_id, action_id)
             if action["state"] != "rollback_pending":
+                replay = action.get("result")
+                matching_decision = (
+                    (approve and action["state"] in {"rolled_back", "manual_review"})
+                    or (not approve and action["state"] == "rollback_declined")
+                )
+                if matching_decision and (
+                    not isinstance(replay, dict)
+                    or str(replay.get("state", "")) != str(action["state"])
+                ):
+                    replay = self._result_for_existing_action(action)
+                    self.sessions.store_action_result(action_id, replay)
+                if matching_decision:
+                    return {**replay, "replayed": True}
                 raise AgentError("invalid_action_state", f"Откат недоступен в состоянии {action['state']}")
             if not approve:
                 self.sessions.transition(action_id, "rollback_pending", "rollback_declined")
                 self._audit("rollback_declined", action_id, {"session_id": session_id})
-                return {"ok": True, "action_id": action_id, "state": "rollback_declined"}
-            return self._rollback(action)
+                result = {"ok": True, "action_id": action_id, "state": "rollback_declined"}
+                self.sessions.store_action_result(action_id, result)
+                return result
+            result = self._rollback(action)
+            self.sessions.store_action_result(action_id, result)
+            return result
 
     def reverify(self, session_id: str, action_id: str) -> dict[str, Any]:
         """Repeat only the deterministic verifier for an applied action.
@@ -122,6 +156,11 @@ class ActionManager:
         with self._process_lock:
             action = self._owned_action(session_id, action_id)
             if action["state"] != "rollback_pending":
+                if (
+                    action["state"] == "verified" and isinstance(action.get("result"), dict)
+                    and action["result"].get("state") == "verified"
+                ):
+                    return {**action["result"], "replayed": True}
                 raise AgentError("invalid_action_state", f"Повторная проверка недоступна в состоянии {action['state']}")
             spec = self.registry.get(action["tool_name"])
             assert spec.verifier is not None
@@ -140,22 +179,26 @@ class ActionManager:
                             {"verification": sanitize(verification.to_dict()), "reverified": True},
                         )
                     self._audit("reverified", action_id, {"verification": sanitize(verification.to_dict())})
-                    return {
+                    result = {
                         "ok": True, "action_id": action_id, "state": "verified",
                         "verification": verification.to_dict(),
                         "message": verification.message or "Повторная проверка успешно пройдена",
                     }
+                    self.sessions.store_action_result(action_id, result)
+                    return result
                 self.sessions.transition(
                     action_id, "rollback_pending", "rollback_pending", error=error,
                 )
                 if action.get("backup_dir"):
                     self.backups.update_state(action["backup_dir"], "rollback_pending", sanitize(error or {}))
                 self._audit("reverify_failed", action_id, sanitize(error or {}))
-                return {
+                result = {
                     "ok": False, "action_id": action_id, "state": "rollback_pending",
                     "error": "verification_failed", "verification": verification.to_dict(),
                     "message": "Повторная проверка не прошла; можно повторить её позже, откатить или оставить изменение",
                 }
+                self.sessions.store_action_result(action_id, result)
+                return result
             finally:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -288,6 +331,29 @@ class ActionManager:
         if action["session_id"] != session_id:
             raise AgentError("action_session_mismatch", "Действие принадлежит другой сессии")
         return action
+
+    @staticmethod
+    def _result_for_existing_action(action: dict[str, Any]) -> dict[str, Any]:
+        """Safe minimal response if transition committed before result persistence."""
+        state = str(action["state"])
+        ok = state in {"verified", "cancelled", "rolled_back", "rollback_declined"}
+        messages = {
+            "verified": "Действие уже было выполнено и проверено",
+            "cancelled": "Действие уже было отменено",
+            "expired": "Срок подтверждения действия уже истёк",
+            "rollback_pending": "Изменение применено, но проверка не прошла; требуется решение об откате",
+            "stale": "План устарел и не был применён",
+            "failed": "Действие завершилось ошибкой до применения",
+            "manual_review": "Состояние действия требует ручной проверки",
+            "rolled_back": "Действие уже было откачено",
+            "rollback_declined": "Откат ранее был отклонён",
+        }
+        return {
+            "ok": ok,
+            "action_id": action["id"],
+            "state": state,
+            "message": messages.get(state, f"Действие уже находится в состоянии {state}"),
+        }
 
     def _lock_file(self):
         Path(self.lock_path).parent.mkdir(parents=True, exist_ok=True)
